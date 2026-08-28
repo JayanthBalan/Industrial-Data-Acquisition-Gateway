@@ -3,6 +3,7 @@
 #define SENSE_TYPE_H
 
 #include <stdint.h>
+#include <time.h>
 
 #define SENSORS_LIMIT_MAX 128
 #define SENSOR_NAME_SIZE 9
@@ -28,16 +29,23 @@ typedef enum ScaleFactor {
 } ScaleFactor_e;
 
 typedef enum SensorType {
-    SENSOR_TYPE_TEMPPRESS,
-    SENSOR_TYPE_POWCURRVOLT,
-    SENSOR_TYPE_TORQUE,
-    SENSOR_TYPE_PROXIMITY
+    SENSOR_TYPE_TEMPPRESS = 0x1B,
+    SENSOR_TYPE_POWCURRVOLT = 0x2B,
+    SENSOR_TYPE_TORQUE = 0x4B,
+    SENSOR_TYPE_PROXIMITY = 0x8B,
+    SENSOR_TYPE_UNSUPPORTED
 } SensorType_e;
 
 typedef enum SensorState {
-    SENSOR_ONLINE,
-    SENSOR_OFFLINE
+    SENSOR_FRAME_DEFAULT,
+    SENSOR_OFFLINE,
+    SENSOR_ONLINE
 } SensorState_e;
+
+typedef enum SensorFrameType {
+    SENSOR_HEARTBEAT,
+    SENSOR_DATA
+} SensorFrameType_e;
 
 typedef struct TempPress {
     int32_t temperature;
@@ -67,12 +75,13 @@ typedef union SensorData {
 
 typedef struct Sensor {
     SensorData_u data;
-    uint64_t timestamp;
+    struct timespec timestamp;
+    struct timespec last_seen_time;
     uint16_t id;
-    uint8_t scale_factor;
     char name[SENSOR_NAME_SIZE];
     SensorType_e type;
     SensorState_e state;
+    SensorFrameType_e frame_type;
 } Sensor_t;
 
 #endif

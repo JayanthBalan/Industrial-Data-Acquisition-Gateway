@@ -13,16 +13,19 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <mqueue.h>
+#include <stdint.h>
 
 #define PORT "9000"
 #define BACKLOG 10
 #define CLIENT_ACCEPT_FAILURE_LIMIT_MAX 16
 
-#define MESSAGE_HEADER_SIZE 6
-#define MESSAGE_DATA_SIZE 12
-#define MESSAGE_SIZE (MESSAGE_HEADER_SIZE + MESSAGE_DATA_SIZE)
+#define PACKET_HEADER_FIELDS_SIZE 6
+#define PACKET_DATA_FIELDS_SIZE 12
+#define PACKET_SIZE (PACKET_HEADER_FIELDS_SIZE + PACKET_DATA_FIELDS_SIZE)
 
 #define SYNC_BYTE 0xAAU
+#define PACKET_DATA_FIELD_LEN_OFFSET_1 4
+#define PACKET_DATA_FIELD_LEN_OFFSET_2 5
 #define MESSAGE_QUEUE_NAME "/mq-acquire-process"
 #define MESSAGE_QUEUE_PRIORITY 3
 
@@ -35,11 +38,13 @@ static int signals_init(void);
 static int ipc_init(void);
 
 static void signalHandler(int);
-static void* connectionHandler(void*);
-static inline void forwardPacket(uint8_t*, ssize_t);
-static ssize_t recv_all(int, void*, size_t);
+static void* socketConnectionHandler(void*);
+static inline void forwardPacket(uint8_t*, size_t);
+static ssize_t socket_recv(int, void*, size_t);
 
 int main() {
+    openlog(__FILE__, LOG_PID | LOG_CONS, LOG_DAEMON);
+
     if(daemon_init() == -1) {
         closelog();
         return -1;
@@ -104,10 +109,11 @@ int main() {
             continue;
         }
         syslog(LOG_INFO, "Client %d Connection Accepted", *client_fd);
+        client_accept_failure_count = 0;
 
         // Thread Designation for Connection
         pthread_t threadConnection;
-        if(pthread_create(&threadConnection, NULL, &connectionHandler, client_fd) != 0) {
+        if(pthread_create(&threadConnection, NULL, &socketConnectionHandler, client_fd) != 0) {
             close(*client_fd);
             free(client_fd);
             syslog(LOG_ERR, "pthread_create() Failure");
@@ -124,15 +130,15 @@ int main() {
     return 0;
 }
 
-static void *connectionHandler(void *arg)
+static void *socketConnectionHandler(void *arg)
 {
     int client_fd = *(int*)arg;
     free(arg);
 
-    uint8_t msg_buffer[MESSAGE_SIZE];
+    uint8_t msg_buffer[PACKET_SIZE];
 
     while (!exitRQ) {
-        ssize_t bytes_read = recv_all(client_fd, msg_buffer, MESSAGE_HEADER_SIZE);
+        ssize_t bytes_read = socket_recv(client_fd, msg_buffer, PACKET_HEADER_FIELDS_SIZE);
         if (bytes_read == 0) {
             syslog(LOG_INFO, "Client %d Disconnected", client_fd);
             break;
@@ -142,20 +148,20 @@ static void *connectionHandler(void *arg)
             break;
         }
 
-        if (msg_buffer[0] != SYNC_BYTE)
+        if (msg_buffer[0] != (uint8_t)SYNC_BYTE)
         {
             syslog(LOG_WARNING, "Invalid Synchronization Byte from Client %d", client_fd);
             continue;
         }
 
-        uint16_t msg_data_len = (uint16_t)msg_buffer[4] | ((uint16_t)msg_buffer[5] << 8);
-        if (msg_data_len > MESSAGE_DATA_SIZE)
+        uint16_t msg_data_len = (uint16_t)msg_buffer[PACKET_DATA_FIELD_LEN_OFFSET_1] | ((uint16_t)msg_buffer[PACKET_DATA_FIELD_LEN_OFFSET_2] << 8);
+        if (msg_data_len > PACKET_DATA_FIELDS_SIZE)
         {
             syslog(LOG_WARNING, "Packet Length Exceeds Maximum Permissible Length = %hu", msg_data_len);
             continue;
         }
 
-        bytes_read = recv_all(client_fd, &msg_buffer[MESSAGE_HEADER_SIZE], msg_data_len);
+        bytes_read = socket_recv(client_fd, &msg_buffer[PACKET_HEADER_FIELDS_SIZE], msg_data_len);
         if (bytes_read == 0) {
             syslog(LOG_INFO, "Client %d Disconnected", client_fd);
             break;
@@ -165,14 +171,14 @@ static void *connectionHandler(void *arg)
             break;
         }
 
-        forwardPacket(msg_buffer, MESSAGE_HEADER_SIZE + msg_data_len);
+        forwardPacket(msg_buffer, (size_t)(PACKET_HEADER_FIELDS_SIZE + msg_data_len));
     }
 
     close(client_fd);
     return NULL;
 }
 
-static ssize_t recv_all(int fd, void *buffer, size_t len) {
+static ssize_t socket_recv(int fd, void *buffer, size_t len) {
     size_t total = 0;
 
     while (total < len) {
@@ -198,7 +204,7 @@ static ssize_t recv_all(int fd, void *buffer, size_t len) {
     return (ssize_t)total;
 }
 
-static inline void forwardPacket(uint8_t *packet, ssize_t len) {
+static inline void forwardPacket(uint8_t *packet, size_t len) {
     if(mq_send(transfer_mq, packet, len, MESSAGE_QUEUE_PRIORITY) == -1) {
         syslog(LOG_ERR, "mq_send() Failed: %s", strerror(errno));
     }
@@ -281,7 +287,7 @@ retrySetSockOpt_signalEINTR:
             goto retrySetSockOpt_signalEINTR;
         }
         freeaddrinfo(serverInfo);
-        syslog(LOG_ERR, "getaddrinfo() Failed: %s", strerror(errno));
+        syslog(LOG_ERR, "setsockopt() Failed: %s", strerror(errno));
         return -1;
     }
 retryBind_signalEINTR:
@@ -293,7 +299,7 @@ retryBind_signalEINTR:
             goto retryBind_signalEINTR;
         }
         freeaddrinfo(serverInfo);
-        syslog(LOG_ERR, "getaddrinfo() Failed: %s", strerror(errno));
+        syslog(LOG_ERR, "bind() Failed: %s", strerror(errno));
         return -1;
     }
 
@@ -303,8 +309,6 @@ retryBind_signalEINTR:
 }
 
 static int daemon_init(void) {
-    openlog(__FILE__, LOG_PID | LOG_CONS, LOG_DAEMON);
-
     pid_t pid = fork();
     if(pid < 0) {
         syslog(LOG_ERR, "fork() Failed: %s", strerror(errno));
@@ -314,6 +318,14 @@ static int daemon_init(void) {
         closelog();
         exit(EXIT_SUCCESS);
     }
+
+    if (setsid() < 0) {
+        syslog(LOG_ERR, "setsid() Failed: %s", strerror(errno));
+        return -1;
+    }
+
+    umask(0);
+    chdir("/");
 
     int devnull = open("/dev/null", O_RDWR);
     if (devnull == -1) {
