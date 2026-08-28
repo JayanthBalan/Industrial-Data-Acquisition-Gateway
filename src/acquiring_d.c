@@ -1,19 +1,8 @@
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-#include <signal.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <sys/types.h>
+#include "process_init.h"
 #include <sys/socket.h>
-#include <syslog.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <mqueue.h>
-#include <stdint.h>
 
 #define PORT "9000"
 #define BACKLOG 10
@@ -29,15 +18,10 @@
 #define MESSAGE_QUEUE_NAME "/mq-acquire-process"
 #define MESSAGE_QUEUE_PRIORITY 3
 
-static volatile sig_atomic_t exitRQ = 0;
 static mqd_t transfer_mq;
 
-static int daemon_init(void);
-static int socket_init(void);
-static int signals_init(void);
 static int ipc_init(void);
-
-static void signalHandler(int);
+static int socket_init(int*);
 static void* socketConnectionHandler(void*);
 static inline void forwardPacket(uint8_t*, size_t);
 static ssize_t socket_recv(int, void*, size_t);
@@ -210,33 +194,9 @@ static inline void forwardPacket(uint8_t *packet, size_t len) {
     }
 }
 
-static void signalHandler(int signo) {
-    if(signo == SIGINT || signo == SIGTERM) {
-        exitRQ = 1;
-    }
-}
-
 static int ipc_init(void) {
     transfer_mq = mq_open(MESSAGE_QUEUE_NAME, O_WRONLY | O_CREAT, 0644, NULL);
     if(transfer_mq == ((mqd_t) - 1)) {
-        return -1;
-    }
-
-    return 0;
-}
-
-static int signals_init(void) {
-    struct sigaction sa = {0};
-    sa.sa_handler = signalHandler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-
-    if (sigaction(SIGINT, &sa, NULL) != 0) {
-        syslog(LOG_ERR, "sigaction(SIGINT) Failed: %s", strerror(errno));
-        return -1;
-    }
-    if (sigaction(SIGTERM, &sa, NULL) != 0) {
-        syslog(LOG_ERR, "sigaction(SIGTERM) Failed: %s", strerror(errno));
         return -1;
     }
 
@@ -259,7 +219,6 @@ static int socket_init(int *server_fd) {
     int status = getaddrinfo(NULL, PORT, &serverHints, &serverInfo);
     if (status != 0) {
         syslog(LOG_ERR, "getaddrinfo() Failed: %s", gai_strerror(status));
-        closelog();
         return -1;
     }
 
@@ -282,63 +241,34 @@ retrySetSockOpt_signalEINTR:
     if (setsockopt(*server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
         if(errno == EINTR) {
             if(exitRQ) {
+                close(*server_fd);
+                freeaddrinfo(serverInfo);
                 return -1;
             }
             goto retrySetSockOpt_signalEINTR;
         }
         freeaddrinfo(serverInfo);
         syslog(LOG_ERR, "setsockopt() Failed: %s", strerror(errno));
+        close(*server_fd);
         return -1;
     }
 retryBind_signalEINTR:
     if (bind(*server_fd, serverInfo->ai_addr, serverInfo->ai_addrlen) != 0) {
         if(errno == EINTR) {
             if(exitRQ) {
+                close(*server_fd);
+                freeaddrinfo(serverInfo);
                 return -1;
             }
             goto retryBind_signalEINTR;
         }
         freeaddrinfo(serverInfo);
+        close(*server_fd);
         syslog(LOG_ERR, "bind() Failed: %s", strerror(errno));
         return -1;
     }
 
     freeaddrinfo(serverInfo);
     serverInfo = NULL;
-    return 0;
-}
-
-static int daemon_init(void) {
-    pid_t pid = fork();
-    if(pid < 0) {
-        syslog(LOG_ERR, "fork() Failed: %s", strerror(errno));
-        return -1;
-    }
-    if(pid > 0) {
-        closelog();
-        exit(EXIT_SUCCESS);
-    }
-
-    if (setsid() < 0) {
-        syslog(LOG_ERR, "setsid() Failed: %s", strerror(errno));
-        return -1;
-    }
-
-    umask(0);
-    chdir("/");
-
-    int devnull = open("/dev/null", O_RDWR);
-    if (devnull == -1) {
-        syslog(LOG_ERR, "open() Failed: %s", strerror(errno));
-        return -1;
-    }
-
-    dup2(devnull, STDIN_FILENO);
-    dup2(devnull, STDOUT_FILENO);
-    dup2(devnull, STDERR_FILENO);
-    if (devnull > STDERR_FILENO) {
-        close(devnull);
-    }
-
     return 0;
 }

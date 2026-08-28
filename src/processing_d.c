@@ -1,17 +1,7 @@
 
 #include "sense.h"
 #include "sense_utils.h"
-#include <mqueue.h>
-#include <syslog.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <signal.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <sys/types.h>
-#include <stdint.h>
+#include "process_init.h"
 #include <time.h>
 
 #define PACKET_HEADER_FIELDS_SIZE 6
@@ -24,16 +14,11 @@
 #define TX_TELEMETRY_MQ_NAME "/mq-process-telemetry"
 #define MQ_PRIORITY 3
 
-static volatile sig_atomic_t exitRQ = 0;
 static mqd_t rx_acquire_mq;
 static mqd_t tx_log_mq;
 static mqd_t tx_telemetry_mq;
 
-static int daemon_init(void);
-static int signals_init(void);
 static int ipc_init(void);
-
-static void signalHandler(int);
 static int forwardFrame(Sensor_t);
 static int generateFrame(uint8_t*, Sensor_t*, size_t);
 static int receivePacket(uint8_t *buffer);
@@ -199,12 +184,6 @@ mq_receive_retry:
     return bytes_read;
 }
 
-static void signalHandler(int signo) {
-    if(signo == SIGINT || signo == SIGTERM) {
-        exitRQ = 1;
-    }
-}
-
 static int ipc_init(void) {
     rx_acquire_mq = mq_open(RX_ACQUIRE_MQ_NAME, O_RDONLY);
     if(rx_acquire_mq == ((mqd_t) - 1)) {
@@ -222,59 +201,6 @@ static int ipc_init(void) {
         mq_close(tx_log_mq);
         mq_unlink(RX_ACQUIRE_MQ_NAME);
         return -1;
-    }
-
-    return 0;
-}
-
-static int signals_init(void) {
-    struct sigaction sa = {0};
-    sa.sa_handler = signalHandler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-
-    if (sigaction(SIGINT, &sa, NULL) != 0) {
-        syslog(LOG_ERR, "sigaction(SIGINT) Failed: %s", strerror(errno));
-        return -1;
-    }
-    if (sigaction(SIGTERM, &sa, NULL) != 0) {
-        syslog(LOG_ERR, "sigaction(SIGTERM) Failed: %s", strerror(errno));
-        return -1;
-    }
-
-    return 0;
-}
-
-static int daemon_init(void) {
-    pid_t pid = fork();
-    if(pid < 0) {
-        syslog(LOG_ERR, "fork() Failed: %s", strerror(errno));
-        return -1;
-    }
-    if(pid > 0) {
-        closelog();
-        exit(EXIT_SUCCESS);
-    }
-
-    if (setsid() < 0) {
-        syslog(LOG_ERR, "setsid() Failed: %s", strerror(errno));
-        return -1;
-    }
-
-    umask(0);
-    chdir("/");
-
-    int devnull = open("/dev/null", O_RDWR);
-    if (devnull == -1) {
-        syslog(LOG_ERR, "open() Failed: %s", strerror(errno));
-        return -1;
-    }
-
-    dup2(devnull, STDIN_FILENO);
-    dup2(devnull, STDOUT_FILENO);
-    dup2(devnull, STDERR_FILENO);
-    if (devnull > STDERR_FILENO) {
-        close(devnull);
     }
 
     return 0;
