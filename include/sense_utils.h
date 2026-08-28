@@ -15,5 +15,7 @@ int writeFrameData(SensorData_u, sensor_timespec_t, uint8_t, int);
 // telemetry_d functions
 int sensorExists(Sensor_t*, Sensor_t*, size_t, int8_t*);
 int updateRegistry(Sensor_t*, Sensor_t*);
+Sensor_t getSensor_ID(uint16_t, Sensor_t*);
+void getTime(Sensor_t, char*);
 
 #endif
