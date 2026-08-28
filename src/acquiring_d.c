@@ -114,8 +114,7 @@ int main() {
     return 0;
 }
 
-static void *socketConnectionHandler(void *arg)
-{
+static void* socketConnectionHandler(void *arg) {
     int client_fd = *(int*)arg;
     free(arg);
 

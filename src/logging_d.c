@@ -5,8 +5,6 @@
 #include <time.h>
 
 #define RX_MQ_NAME "/mq-process-log"
-#define MQ_PRIORITY 3
-
 #define FILENAME_SIZE 64
 
 static mqd_t rx_process_mq;

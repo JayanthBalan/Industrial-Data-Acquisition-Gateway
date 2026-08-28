@@ -7,6 +7,7 @@
 
 #define SENSORS_LIMIT_MAX 128
 #define SENSOR_NAME_SIZE 9
+#define SENSOR_INACTIVE_SECS_MAX 30
 
 // First 'N' Digits of Sensor Name
 #define SENSOR_NAME_3_TEMPRESS "TPS"
@@ -17,6 +18,8 @@
 Sensor Name Structure: 
 "SENSOR_NAME_<N>_<SENSORTYPE>" "<SENSORTYPENUMBER>" "<SENSORID>"
 */
+
+typedef struct timespec sensor_timespec_t;
 
 typedef enum ScaleFactor {
     TEMP_SCALE = 10,
@@ -75,8 +78,8 @@ typedef union SensorData {
 
 typedef struct Sensor {
     SensorData_u data;
-    struct timespec timestamp;
-    struct timespec last_seen_time;
+    sensor_timespec_t timestamp;
+    sensor_timespec_t last_seen_time;
     uint16_t id;
     char name[SENSOR_NAME_SIZE];
     SensorType_e type;
