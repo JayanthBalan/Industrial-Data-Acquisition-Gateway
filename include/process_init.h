@@ -15,7 +15,7 @@
 #include <sys/types.h>
 #include <stdint.h>
 
-extern volatile sig_atomic_t exitRQ = 0;
+extern volatile sig_atomic_t exitRQ;
 
 int daemon_init(void);
 int signals_init(void);

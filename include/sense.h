@@ -6,23 +6,13 @@
 #include <time.h>
 
 #define SENSORS_LIMIT_MAX 128
-#define SENSOR_NAME_SIZE 9
+#define SENSOR_NAME_SIZE 13
 #define SENSOR_INACTIVE_SECS_MAX 30
-
-// First 'N' Digits of Sensor Name
-#define SENSOR_NAME_3_TEMPRESS "TPS"
-#define SENSOR_NAME_4_POWCURRVOLT "PCVS"
-#define SENSOR_NAME_5_TORQUE "TORQS"
-#define SENSOR_NAME_5_PROXIMITY "PROXS"
-/*
-Sensor Name Structure: 
-"SENSOR_NAME_<N>_<SENSORTYPE>" "<SENSORTYPENUMBER>" "<SENSORID>"
-*/
 
 typedef struct timespec sensor_timespec_t;
 
 typedef enum ScaleFactor {
-    TEMP_SCALE = 10,
+    TEMPERATURE_SCALE = 10,
     PRESSURE_SCALE = 100,
     VOLTAGE_SCALE = 100,
     CURRENT_SCALE = 100,
@@ -58,7 +48,7 @@ typedef struct TempPress {
 typedef struct PowCurrVolt {
     int32_t power;
     int32_t current;
-    int32_t volt;
+    int32_t voltage;
 } PowCurrVolt_t;
 
 typedef struct Torque {

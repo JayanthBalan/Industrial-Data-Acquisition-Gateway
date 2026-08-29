@@ -5,17 +5,18 @@
 #include "sense.h"
 
 // processing_d functions
-void nameSensor(char*);
-int recordSensorData(SensorData_u*, uint8_t*, uint16_t);
+void nameSensor(char*, uint16_t, SensorType_e);
+int recordSensorData(SensorData_u*, uint8_t*, uint16_t, SensorType_e);
 
 // logging_d function
-int writeFrameData(SensorData_u, sensor_timespec_t, uint8_t, int);
+int writeFrameData(SensorData_u, SensorType_e, sensor_timespec_t, uint8_t, int);
 
 // telemetry_d functions
 int sensorExists(Sensor_t*, Sensor_t*, size_t, int8_t*);
 int updateRegistry(Sensor_t*, Sensor_t*);
-Sensor_t getSensor_ID(uint16_t, Sensor_t*);
+Sensor_t getSensor_ID(uint16_t, Sensor_t*, size_t);
 void getTime(Sensor_t, char*);
+void getDataString(Sensor_t, char*);
 
 // telemetry_d && processing_d functions
 SensorType_e findSensorType(uint8_t);

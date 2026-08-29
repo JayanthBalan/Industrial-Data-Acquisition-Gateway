@@ -119,7 +119,7 @@ static int generateFrame(uint8_t *buffer, Sensor_t *frame, size_t size) {
     iter += 2;
 
     // Name
-    nameSensor(frame->name);
+    nameSensor(frame->name, frame->id, frame->type);
 
     // Timestamp and Heartbeat collect
     clock_gettime(CLOCK_REALTIME, &frame->timestamp);
@@ -136,7 +136,7 @@ static int generateFrame(uint8_t *buffer, Sensor_t *frame, size_t size) {
     frame->state = SENSOR_FRAME_DEFAULT;
 
     //Data record
-    if(recordSensorData(&frame->data, &buffer[iter], len) == -1) {
+    if(recordSensorData(&frame->data, &buffer[iter], len, frame->type) == -1) {
         syslog(LOG_ERR, "Sensor Data Error");
         return -1;
     }

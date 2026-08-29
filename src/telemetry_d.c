@@ -22,7 +22,7 @@
 #define SELECTION_BYTE_GETOFFLINE 0xFE
 #define ID_BYTE_SIZE 2
 #define TYPE_BYTE_SIZE 1
-#define TRANSMIT_BUFFER_SIZE 100
+#define TRANSMIT_BUFFER_SIZE 500
 
 static mqd_t rx_process_mq;
 pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -303,7 +303,7 @@ static void* userHandler(void *arg) {
             }
 
             pthread_mutex_lock(&registry_mutex);
-            Sensor_t target_sensor = getSensor_ID(call_id, sensor_registry);
+            Sensor_t target_sensor = getSensor_ID(call_id, sensor_registry, sensor_count);
             pthread_mutex_unlock(&registry_mutex);
 
             if(giveSensor(target_sensor, client_fd) == -1) {

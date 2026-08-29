@@ -56,7 +56,7 @@ int main() {
             return -1;
         }
 
-        if(writeFrameData(data_frame.data, data_frame.timestamp, newfile_flag, fd) == -1) {
+        if(writeFrameData(data_frame.data, data_frame.type, data_frame.timestamp, newfile_flag, fd) == -1) {
             mq_close(rx_process_mq);
             unlink(RX_MQ_NAME);
             close(fd);
