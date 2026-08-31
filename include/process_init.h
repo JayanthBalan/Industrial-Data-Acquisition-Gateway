@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <sys/types.h>
 #include <stdint.h>
+#include <sys/stat.h>
 
 extern volatile sig_atomic_t exitRQ;
 
