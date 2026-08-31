@@ -1,36 +1,30 @@
 
 CC = $(CROSS_COMPILE)gcc
-AR = $(CROSS_COMPILE)ar
 
-CFLAGS = -g -Wall -Wextra -Werror -I../include
+CFLAGS = -g -Wall -Wextra -Werror
+CPPFLAGS = -I../include
 
-SRC_DIR = ../src
+all: acquiringd loggingd processingd telemetryd
 
-LIB = libsense_utils.a
-LIB_OBJ = sense_utils.o
+sense_utils.o: ../src/sense_utils.c ../include/sense_utils.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-all: $(LIB) acquiringd loggingd processingd telemetryd
+libsenseutils.a: sense_utils.o
+	ar rcs $@ $^
 
-$(LIB): $(LIB_OBJ)
-	$(AR) rcs $@ $^
+acquiringd: ../src/acquiring_d.c ../include/...
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< -L. -lsenseutils -o $@
 
-$(LIB_OBJ): $(SRC_DIR)/sense_utils.c
-	$(CC) $(CFLAGS) -c $< -o $@
+loggingd: ../src/logging_d.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< -L. -lsenseutils -o $@
 
-acquiringd: $(SRC_DIR)/acquiring_d.c $(LIB)
-	$(CC) $(CFLAGS) $< -L. -lsense_utils -o $@
+processingd: ../src/processing_d.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< -L. -lsenseutils -o $@
 
-loggingd: $(SRC_DIR)/logging_d.c $(LIB)
-	$(CC) $(CFLAGS) $< -L. -lsense_utils -o $@
-
-processingd: $(SRC_DIR)/processing_d.c $(LIB)
-	$(CC) $(CFLAGS) $< -L. -lsense_utils -o $@
-
-telemetryd: $(SRC_DIR)/telemetry_d.c $(LIB)
-	$(CC) $(CFLAGS) $< -L. -lsense_utils -o $@
+telemetryd: ../src/telemetry_d.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< -L. -lsenseutils -o $@
 
 clean:
-	rm -f $(LIB_OBJ) $(LIB)
-	rm -f acquiringd processingd loggingd telemetryd
+	rm -f *.o *.a acquiringd loggingd processingd telemetryd
 
 .PHONY: all clean
