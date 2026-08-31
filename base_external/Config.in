@@ -1,1 +1,2 @@
+
 source "$BR2_EXTERNAL_project_base_PATH/package/industrial-data-acquisition-gateway/Config.in"
