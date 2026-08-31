@@ -1,0 +1,20 @@
+#!/bin/sh
+
+case "$1" in
+  start)
+    start-stop-daemon -S -n acquiringd -a /usr/bin/acquiringd
+    start-stop-daemon -S -n processingd -a /usr/bin/processingd
+    start-stop-daemon -S -n loggingd -a /usr/bin/loggingd
+    start-stop-daemon -S -n telemetryd -a /usr/bin/telemetryd
+    ;;
+  stop)
+    start-stop-daemon -K -n acquiringd
+    start-stop-daemon -K -n processingd
+    start-stop-daemon -K -n loggingd
+    start-stop-daemon -K -n telemetryd
+    ;;
+  *)
+    exit 1
+esac
+
+exit 0

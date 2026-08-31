@@ -1,0 +1,5 @@
+
+config BR2_PACKAGE_INDUSTRIAL-DATA-ACQUISITION-GATEWAY
+	bool "industrial-data-acquisition-gateway"
+	help
+	  Includes the 4 daemon processes to acquire, process, log and transmit the sensor data.
