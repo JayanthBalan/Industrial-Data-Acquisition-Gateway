@@ -210,7 +210,7 @@ static void *normal_client_thread(void *arg)
 
             printf("Normal client %d sent: Type=%02lX ID=%lu Length=%u\n", args->thread_id, type_value, id_value, (unsigned int)data_length);
 
-            usleep(100000);
+            usleep(500000);
         }
 
         clearerr(file);
