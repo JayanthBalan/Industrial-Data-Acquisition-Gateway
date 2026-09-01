@@ -190,7 +190,7 @@ static int ipc_init(void) {
         syslog(LOG_ERR, "mq_getattr failed: %s", strerror(errno));
         return -1;
     }
-    if (attr.mq_msgsize < 0 || (size_t)attr.mq_msgsize < sizeof(Sensor_t)) {
+    if (attr.mq_msgsize < 0 || attr.mq_msgsize < (long)PACKET_SIZE) {
         syslog(LOG_ERR, "Acquisition MQ message size too small: %ld", attr.mq_msgsize);
         mq_close(rx_acquire_mq);
         return -1;

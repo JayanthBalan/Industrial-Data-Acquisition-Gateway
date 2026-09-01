@@ -3,7 +3,11 @@
 case "$1" in
   start)
     start-stop-daemon -S -n acquiringd -a /usr/bin/acquiringd
+    sleep 1
+
     start-stop-daemon -S -n processingd -a /usr/bin/processingd
+    sleep 1
+    
     start-stop-daemon -S -n loggingd -a /usr/bin/loggingd
     start-stop-daemon -S -n telemetryd -a /usr/bin/telemetryd
     ;;
