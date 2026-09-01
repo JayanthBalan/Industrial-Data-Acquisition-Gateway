@@ -485,8 +485,8 @@ static int giveSensorAll(int fd) {
 }
 
 static int giveSensor(Sensor_t target, int socket_fd) {
-    char timestamp_curr[INTER_BUF_SIZE] = "";
-    char dataString[WRITE_BUFFER_SIZE] = "";
+    char timestamp_curr[50] = "";
+    char dataString[300] = "";
     char sendBuffer[TRANSMIT_BUFFER_SIZE] = "";
 
     getTime(target, timestamp_curr);
