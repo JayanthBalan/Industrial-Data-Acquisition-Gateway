@@ -129,10 +129,19 @@ static int parse_latency_response(const char *response, int64_t *sent_seconds, i
 
 static void log_latency(FILE *file, int64_t sent_seconds, int64_t sent_nanoseconds)
 {
+    static int64_t previous_seconds = -1;
+    static int64_t previous_nanoseconds = -1;
     struct timespec now;
     int64_t sent_time_us;
     int64_t current_time_us;
     int64_t latency_us;
+
+    if(sent_seconds == previous_seconds && sent_nanoseconds == previous_nanoseconds) {
+        return;
+    }
+
+    previous_seconds = sent_seconds;
+    previous_nanoseconds = sent_nanoseconds;
 
     if(clock_gettime(CLOCK_REALTIME, &now) == -1) {
         return;
@@ -245,7 +254,7 @@ static void *latency_receiver_thread(void *arg)
 
         pthread_mutex_unlock(args->request_mutex);
 
-        usleep(1000000);
+        usleep(15000);
     }
 
     return NULL;
