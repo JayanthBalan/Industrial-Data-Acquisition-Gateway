@@ -17,13 +17,16 @@ const char *SENSOR_NAME_4_POWCURRVOLT = "PCVS";
 const char *SENSOR_NAME_5_TORQUE = "TORQS";
 const char *SENSOR_NAME_5_PROXIMITY = "PROXS";
 
-static inline void measurement_to_string(char*, size_t, int32_t, int);
-static int write_all(int, const char*, size_t);
+static inline void measurement_to_string(char *, size_t, int32_t, int);
+static int write_all(int, const char *, size_t);
 
 void nameSensor(char *string, uint16_t id, SensorType_e type) {
-    size_t string_size = SENSOR_NAME_SIZE;
-
     const char *name_base;
+
+    if(string == NULL) {
+        return;
+    }
+
     switch(type) {
         case SENSOR_TYPE_POWCURRVOLT:
             name_base = SENSOR_NAME_4_POWCURRVOLT;
@@ -42,12 +45,16 @@ void nameSensor(char *string, uint16_t id, SensorType_e type) {
             return;
     }
 
-    snprintf(string, string_size, "%s_0X%" PRIx16, name_base, id);
+    snprintf(string, SENSOR_NAME_SIZE, "%s_0X%" PRIx16, name_base, id);
 }
 
 int recordSensorData(SensorData_u *target, const uint8_t *raw_data, uint16_t byte_size, SensorType_e type) {
     uint16_t idx = 0;
     uint32_t value;
+
+    if(target == NULL || raw_data == NULL) {
+        return -1;
+    }
 
     if(type == SENSOR_TYPE_POWCURRVOLT) {
         if(byte_size != 12) {
@@ -111,14 +118,25 @@ int recordSensorData(SensorData_u *target, const uint8_t *raw_data, uint16_t byt
 int writeFrameData(SensorData_u data, SensorType_e type, sensor_timespec_t stamp, uint8_t flag, int fd) {
     char title_buffer[WRITE_BUFFER_SIZE] = "";
     char write_buffer[WRITE_BUFFER_SIZE] = "";
-    size_t write_len = 0;
-
+    char timestamp[INTER_BUF_SIZE] = "";
+    char power[INTER_BUF_SIZE] = "";
+    char current[INTER_BUF_SIZE] = "";
+    char voltage[INTER_BUF_SIZE] = "";
+    char temperature[INTER_BUF_SIZE] = "";
+    char pressure[INTER_BUF_SIZE] = "";
+    char proximity[INTER_BUF_SIZE] = "";
+    char torque[INTER_BUF_SIZE] = "";
     struct tm info;
+    int result;
+
+    if(fd < 0) {
+        return -1;
+    }
+
     if(localtime_r(&stamp.tv_sec, &info) == NULL) {
         return -1;
     }
 
-    char timestamp[INTER_BUF_SIZE] = "";
     if(strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &info) == 0) {
         return -1;
     }
@@ -126,91 +144,71 @@ int writeFrameData(SensorData_u data, SensorType_e type, sensor_timespec_t stamp
     switch(type) {
         case SENSOR_TYPE_POWCURRVOLT:
             if(flag == 1) {
-                snprintf(title_buffer, sizeof(title_buffer), "<Timestamp> -> <power>W :: <current>A :: <voltage>V\n");
-                write_len = strlen(title_buffer);
-                if(write_all(fd, title_buffer, write_len) == -1) {
+                result = snprintf(title_buffer, sizeof(title_buffer), "<Timestamp> -> <power>W :: <current>A :: <voltage>V\n");
+                if(result < 0 || (size_t)result >= sizeof(title_buffer) || write_all(fd, title_buffer, (size_t)result) == -1) {
                     return -1;
                 }
             }
 
-            char power[INTER_BUF_SIZE], current[INTER_BUF_SIZE], voltage[INTER_BUF_SIZE];
-            measurement_to_string(power, INTER_BUF_SIZE, data.powcurrvolt.power, POWER_SCALE);
-            measurement_to_string(current, INTER_BUF_SIZE, data.powcurrvolt.current, CURRENT_SCALE);
-            measurement_to_string(voltage, INTER_BUF_SIZE, data.powcurrvolt.voltage, VOLTAGE_SCALE);
-            snprintf(write_buffer, sizeof(write_buffer), "%s -> %sW :: %sA :: %sV\n", timestamp, power, current, voltage);
-
-            write_len = strlen(write_buffer);
-            if(write_all(fd, write_buffer, write_len) == -1) {
-                return -1;
-            }
+            measurement_to_string(power, sizeof(power), data.powcurrvolt.power, POWER_SCALE);
+            measurement_to_string(current, sizeof(current), data.powcurrvolt.current, CURRENT_SCALE);
+            measurement_to_string(voltage, sizeof(voltage), data.powcurrvolt.voltage, VOLTAGE_SCALE);
+            result = snprintf(write_buffer, sizeof(write_buffer), "%s -> %sW :: %sA :: %sV\n", timestamp, power, current, voltage);
             break;
 
         case SENSOR_TYPE_TEMPPRESS:
             if(flag == 1) {
-                snprintf(title_buffer, sizeof(title_buffer), "<Timestamp> -> <temperature>C :: <pressure>Pa\n");
-                write_len = strlen(title_buffer);
-                if(write_all(fd, title_buffer, write_len) == -1) {
+                result = snprintf(title_buffer, sizeof(title_buffer), "<Timestamp> -> <temperature>C :: <pressure>Pa\n");
+                if(result < 0 || (size_t)result >= sizeof(title_buffer) || write_all(fd, title_buffer, (size_t)result) == -1) {
                     return -1;
                 }
             }
 
-            char temperature[INTER_BUF_SIZE], pressure[INTER_BUF_SIZE];
-            measurement_to_string(temperature, INTER_BUF_SIZE, data.temppress.temperature, TEMPERATURE_SCALE);
-            measurement_to_string(pressure, INTER_BUF_SIZE, data.temppress.pressure, PRESSURE_SCALE);
-            snprintf(write_buffer, sizeof(write_buffer), "%s -> %sC :: %sPa\n", timestamp, temperature, pressure);
-
-            write_len = strlen(write_buffer);
-            if(write_all(fd, write_buffer, write_len) == -1) {
-                return -1;
-            }
+            measurement_to_string(temperature, sizeof(temperature), data.temppress.temperature, TEMPERATURE_SCALE);
+            measurement_to_string(pressure, sizeof(pressure), (int32_t)data.temppress.pressure, PRESSURE_SCALE);
+            result = snprintf(write_buffer, sizeof(write_buffer), "%s -> %sC :: %sPa\n", timestamp, temperature, pressure);
             break;
 
         case SENSOR_TYPE_PROXIMITY:
             if(flag == 1) {
-                snprintf(title_buffer, sizeof(title_buffer), "<Timestamp> -> <proximity>m\n");
-                write_len = strlen(title_buffer);
-                if(write_all(fd, title_buffer, write_len) == -1) {
+                result = snprintf(title_buffer, sizeof(title_buffer), "<Timestamp> -> <proximity>m\n");
+                if(result < 0 || (size_t)result >= sizeof(title_buffer) || write_all(fd, title_buffer, (size_t)result) == -1) {
                     return -1;
                 }
             }
 
-            char proximity[INTER_BUF_SIZE];
-            measurement_to_string(proximity, INTER_BUF_SIZE, data.prox.proximity, PROXIMITY_SCALE);
-            snprintf(write_buffer, sizeof(write_buffer), "%s -> %sm\n", timestamp, proximity);
-
-            write_len = strlen(write_buffer);
-            if(write_all(fd, write_buffer, write_len) == -1) {
-                return -1;
-            }
+            measurement_to_string(proximity, sizeof(proximity), (int32_t)data.prox.proximity, PROXIMITY_SCALE);
+            result = snprintf(write_buffer, sizeof(write_buffer), "%s -> %sm\n", timestamp, proximity);
             break;
 
         case SENSOR_TYPE_TORQUE:
             if(flag == 1) {
-                snprintf(title_buffer, sizeof(title_buffer), "<Timestamp> -> <torque>Nm\n");
-                write_len = strlen(title_buffer);
-                if(write_all(fd, title_buffer, write_len) == -1) {
+                result = snprintf(title_buffer, sizeof(title_buffer), "<Timestamp> -> <torque>Nm\n");
+                if(result < 0 || (size_t)result >= sizeof(title_buffer) || write_all(fd, title_buffer, (size_t)result) == -1) {
                     return -1;
                 }
             }
 
-            char torque[INTER_BUF_SIZE];
-            measurement_to_string(torque, INTER_BUF_SIZE, data.tor.torque, TORQUE_SCALE);
-            snprintf(write_buffer, sizeof(write_buffer), "%s -> %sNm\n", timestamp, torque);
-
-            write_len = strlen(write_buffer);
-            if(write_all(fd, write_buffer, write_len) == -1) {
-                return -1;
-            }
+            measurement_to_string(torque, sizeof(torque), data.tor.torque, TORQUE_SCALE);
+            result = snprintf(write_buffer, sizeof(write_buffer), "%s -> %sNm\n", timestamp, torque);
             break;
 
         default:
             return -1;
     }
 
-    return 0;
+    if(result < 0 || (size_t)result >= sizeof(write_buffer)) {
+        return -1;
+    }
+
+    return write_all(fd, write_buffer, (size_t)result);
 }
 
 int sensorExists(Sensor_t *frame, Sensor_t *registry, size_t count, int8_t *new_sensor_flag) {
+    if(frame == NULL || registry == NULL || new_sensor_flag == NULL) {
+        return -1;
+    }
+
     *new_sensor_flag = 0;
 
     for(size_t idx = 0; idx < count; idx++) {
@@ -235,6 +233,10 @@ int updateRegistry(Sensor_t *source, Sensor_t *target) {
 Sensor_t getSensor_ID(uint16_t id, Sensor_t *registry, size_t count) {
     Sensor_t empty_sensor = {0};
 
+    if(registry == NULL) {
+        return empty_sensor;
+    }
+
     for(size_t idx = 0; idx < count; idx++) {
         if(registry[idx].id == id) {
             return registry[idx];
@@ -247,6 +249,10 @@ Sensor_t getSensor_ID(uint16_t id, Sensor_t *registry, size_t count) {
 void getTime(Sensor_t frame, char *string) {
     struct tm info;
 
+    if(string == NULL) {
+        return;
+    }
+
     if(localtime_r(&frame.timestamp.tv_sec, &info) == NULL) {
         string[0] = '\0';
         return;
@@ -258,36 +264,36 @@ void getTime(Sensor_t frame, char *string) {
 }
 
 void getDataString(Sensor_t frame, char *string) {
-    char measurement[INTER_BUF_SIZE];
+    char measurement1[INTER_BUF_SIZE] = "";
+    char measurement2[INTER_BUF_SIZE] = "";
+    char measurement3[INTER_BUF_SIZE] = "";
+
+    if(string == NULL) {
+        return;
+    }
 
     switch(frame.type) {
         case SENSOR_TYPE_POWCURRVOLT:
-            measurement_to_string(measurement, sizeof(measurement), frame.data.powcurrvolt.power, POWER_SCALE);
-            snprintf(string, WRITE_BUFFER_SIZE, "%sW :: ", measurement);
-            measurement_to_string(measurement, sizeof(measurement), frame.data.powcurrvolt.current, CURRENT_SCALE);
-            strncat(string, measurement, WRITE_BUFFER_SIZE - strlen(string) - 1);
-            strncat(string, "A :: ", WRITE_BUFFER_SIZE - strlen(string) - 1);
-            measurement_to_string(measurement, sizeof(measurement), frame.data.powcurrvolt.voltage, VOLTAGE_SCALE);
-            strncat(string, measurement, WRITE_BUFFER_SIZE - strlen(string) - 1);
-            strncat(string, "V", WRITE_BUFFER_SIZE - strlen(string) - 1);
+            measurement_to_string(measurement1, sizeof(measurement1), frame.data.powcurrvolt.power, POWER_SCALE);
+            measurement_to_string(measurement2, sizeof(measurement2), frame.data.powcurrvolt.current, CURRENT_SCALE);
+            measurement_to_string(measurement3, sizeof(measurement3), frame.data.powcurrvolt.voltage, VOLTAGE_SCALE);
+            snprintf(string, WRITE_BUFFER_SIZE, "%sW :: %sA :: %sV", measurement1, measurement2, measurement3);
             break;
 
         case SENSOR_TYPE_TEMPPRESS:
-            measurement_to_string(measurement, sizeof(measurement), frame.data.temppress.temperature, TEMPERATURE_SCALE);
-            snprintf(string, WRITE_BUFFER_SIZE, "%sC :: ", measurement);
-            measurement_to_string(measurement, sizeof(measurement), frame.data.temppress.pressure, PRESSURE_SCALE);
-            strncat(string, measurement, WRITE_BUFFER_SIZE - strlen(string) - 1);
-            strncat(string, "Pa", WRITE_BUFFER_SIZE - strlen(string) - 1);
+            measurement_to_string(measurement1, sizeof(measurement1), frame.data.temppress.temperature, TEMPERATURE_SCALE);
+            measurement_to_string(measurement2, sizeof(measurement2), (int32_t)frame.data.temppress.pressure, PRESSURE_SCALE);
+            snprintf(string, WRITE_BUFFER_SIZE, "%sC :: %sPa", measurement1, measurement2);
             break;
 
         case SENSOR_TYPE_PROXIMITY:
-            measurement_to_string(measurement, sizeof(measurement), frame.data.prox.proximity, PROXIMITY_SCALE);
-            snprintf(string, WRITE_BUFFER_SIZE, "%sm", measurement);
+            measurement_to_string(measurement1, sizeof(measurement1), (int32_t)frame.data.prox.proximity, PROXIMITY_SCALE);
+            snprintf(string, WRITE_BUFFER_SIZE, "%sm", measurement1);
             break;
 
         case SENSOR_TYPE_TORQUE:
-            measurement_to_string(measurement, sizeof(measurement), frame.data.tor.torque, TORQUE_SCALE);
-            snprintf(string, WRITE_BUFFER_SIZE, "%sNm", measurement);
+            measurement_to_string(measurement1, sizeof(measurement1), frame.data.tor.torque, TORQUE_SCALE);
+            snprintf(string, WRITE_BUFFER_SIZE, "%sNm", measurement1);
             break;
 
         default:
@@ -314,14 +320,20 @@ SensorType_e findSensorType(uint8_t type) {
 static int write_all(int fd, const char *buffer, size_t len) {
     size_t total = 0;
 
+    if(fd < 0 || buffer == NULL) {
+        return -1;
+    }
+
     while(total < len) {
         ssize_t bytes_written = write(fd, buffer + total, len - total);
+
         if(bytes_written < 0) {
             if(errno == EINTR) {
                 continue;
             }
             return -1;
         }
+
         if(bytes_written == 0) {
             return -1;
         }
@@ -333,6 +345,9 @@ static int write_all(int fd, const char *buffer, size_t len) {
 }
 
 static inline void measurement_to_string(char *buffer, size_t len, int32_t value, int scale) {
-    float actual_val = value/(float)scale;
-    snprintf(buffer, len, "%f", actual_val);
+    if(buffer == NULL || len == 0 || scale == 0) {
+        return;
+    }
+
+    snprintf(buffer, len, "%f", (double)value / (double)scale);
 }
