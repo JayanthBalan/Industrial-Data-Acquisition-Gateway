@@ -132,56 +132,34 @@ static ssize_t receive_response(int sockfd, char *buffer, size_t buffer_size)
     return bytes_received;
 }
 
-static int parse_latency_response(const char *response, int32_t *sent_seconds, int32_t *sent_microseconds)
+static int parse_latency_response(const char *response, int64_t *sent_seconds, int64_t *sent_nanoseconds)
 {
-    const char *power;
-    const char *current;
-
-    power = strstr(response, "Power:");
-    current = strstr(response, "Current:");
-
-    if (power == NULL || current == NULL) {
-        return -1;
-    }
-
-    if (sscanf(power, "Power: %d", sent_seconds) != 1) {
-        return -1;
-    }
-
-    if (sscanf(current, "Current: %d", sent_microseconds) != 1) {
+    if(sscanf(response, "LATENCY: %lld %lld", (long long *)sent_seconds, (long long *)sent_nanoseconds) != 2) {
         return -1;
     }
 
     return 0;
 }
 
-static void log_latency(FILE *file, int32_t sent_seconds, int32_t sent_microseconds)
+static void log_latency(FILE *file, int64_t sent_seconds, int64_t sent_nanoseconds)
 {
     struct timespec now;
-    uint32_t current_seconds;
-    uint32_t current_microseconds;
-    int64_t sent_time_us;
-    int64_t current_time_us;
-    int64_t latency_us;
+    int64_t sent_time_ns;
+    int64_t current_time_ns;
+    int64_t latency_ns;
 
-    clock_gettime(CLOCK_REALTIME, &now);
-
-    current_seconds = (uint32_t)((now.tv_sec % 86400 + 86400) % 86400);
-    current_microseconds = (uint32_t)(now.tv_nsec / 1000);
-
-    sent_time_us = (int64_t)sent_seconds * 1000000LL + sent_microseconds;
-    current_time_us = (int64_t)current_seconds * 1000000LL + current_microseconds;
-
-    latency_us = current_time_us - sent_time_us;
-
-    if (latency_us < 0) {
-        latency_us += 86400LL * 1000000LL;
+    if(clock_gettime(CLOCK_MONOTONIC, &now) == -1) {
+        return;
     }
 
-    fprintf(file, "%d,%d,%u,%u,%lld\n", sent_seconds, sent_microseconds, current_seconds, current_microseconds, (long long)latency_us);
+    sent_time_ns = sent_seconds * 1000000000LL + sent_nanoseconds;
+    current_time_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+    latency_ns = current_time_ns - sent_time_ns;
+
+    fprintf(file, "%lld,%lld,%lld,%ld,%lld\n", (long long)sent_seconds, (long long)sent_nanoseconds, (long long)now.tv_sec, now.tv_nsec, (long long)latency_ns);
     fflush(file);
 
-    printf("Latency: %lld us (%.3f ms)\n", (long long)latency_us, (double)latency_us / 1000.0);
+    printf("Latency: %lld ns (%.3f ms)\n", (long long)latency_ns, (double)latency_ns / 1000000.0);
 }
 
 static void *latency_receiver_thread(void *arg)
@@ -192,29 +170,28 @@ static void *latency_receiver_thread(void *arg)
 
     sockfd = connect_to_server(args->server_ip, args->server_port);
 
-    if (sockfd == -1) {
+    if(sockfd == -1) {
         return NULL;
     }
 
     latency_file = fopen(LATENCY_LOG_FILE, "w");
 
-    if (latency_file == NULL) {
+    if(latency_file == NULL) {
         perror("fopen");
         close(sockfd);
         return NULL;
     }
 
-    fprintf(latency_file, "sent_seconds,sent_microseconds,current_seconds,current_microseconds,latency_microseconds\n");
-
+    fprintf(latency_file, "sent_seconds,sent_nanoseconds,current_seconds,current_nanoseconds,latency_nanoseconds\n");
     printf("Latency receiver started\n");
 
-    while (1) {
+    while(1) {
         char buffer[TELEMETRY_BUFFER_SIZE];
         ssize_t bytes_received;
-        int32_t sent_seconds;
-        int32_t sent_microseconds;
+        int64_t sent_seconds;
+        int64_t sent_nanoseconds;
 
-        if (send_get_id(sockfd, LATENCY_SENSOR_ID) == -1) {
+        if(send_get_id(sockfd, LATENCY_SENSOR_ID) == -1) {
             fclose(latency_file);
             close(sockfd);
             return NULL;
@@ -222,23 +199,18 @@ static void *latency_receiver_thread(void *arg)
 
         bytes_received = receive_response(sockfd, buffer, sizeof(buffer));
 
-        if (bytes_received <= 0) {
+        if(bytes_received <= 0) {
             fclose(latency_file);
             close(sockfd);
             return NULL;
         }
 
-        if (parse_latency_response(buffer, &sent_seconds, &sent_microseconds) == 0) {
-            log_latency(latency_file, sent_seconds, sent_microseconds);
+        if(parse_latency_response(buffer, &sent_seconds, &sent_nanoseconds) == 0) {
+            log_latency(latency_file, sent_seconds, sent_nanoseconds);
         }
 
         usleep(1000);
     }
-
-    fclose(latency_file);
-    close(sockfd);
-
-    return NULL;
 }
 
 static int send_user_command(int sockfd, const char *command)
@@ -265,8 +237,16 @@ static int send_user_command(int sockfd, const char *command)
         return send_all(sockfd, packet, 2);
     }
 
-    if (strncmp(command, "GET ID ", 7) == 0) {
-        id = (uint16_t)strtoul(command + 7, NULL, 10);
+    if(strncmp(command, "GET ID ", 7) == 0) {
+        char *endptr;
+        unsigned long value = strtoul(command + 7, &endptr, 16);
+
+        if(endptr == command + 7 || value > UINT16_MAX) {
+            fprintf(stderr, "Invalid hexadecimal sensor ID\n");
+            return -1;
+        }
+
+        id = (uint16_t)value;
 
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETID;
@@ -355,10 +335,13 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        bytes_received = receive_response(sockfd, buffer, sizeof(buffer));
+        while((bytes_received = receive_response(sockfd, buffer, sizeof(buffer))) > 0) {
+            printf("%s", buffer);
+        }
 
-        if (bytes_received > 0) {
-            printf("%s\n", buffer);
+        if(bytes_received < 0) {
+            close(sockfd);
+            continue;
         }
 
         close(sockfd);
