@@ -154,6 +154,7 @@ static void* socketConnectionHandler(void *arg) {
             break;
         }
 
+        syslog(LOG_INFO, "Received packet Type=%02X ID=%u Length=%u", msg_buffer[1], (unsigned int)((uint16_t)msg_buffer[2] | ((uint16_t)msg_buffer[3] << 8)), (unsigned int)msg_data_len);
         forwardPacket(msg_buffer, (size_t)(PACKET_HEADER_FIELDS_SIZE + msg_data_len));
     }
 
