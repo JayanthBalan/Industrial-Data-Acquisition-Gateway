@@ -44,19 +44,19 @@ static int connect_to_server(const char *ip, int port)
 
     status = getaddrinfo(ip, port_string, &hints, &result);
 
-    if (status != 0) {
+    if(status != 0) {
         fprintf(stderr, "getaddrinfo() failed: %s\n", gai_strerror(status));
         return -1;
     }
 
-    for (rp = result; rp != NULL; rp = rp->ai_next) {
+    for(rp = result; rp != NULL; rp = rp->ai_next) {
         sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
 
-        if (sockfd == -1) {
+        if(sockfd == -1) {
             continue;
         }
 
-        if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
+        if(connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
             break;
         }
 
@@ -66,7 +66,7 @@ static int connect_to_server(const char *ip, int port)
 
     freeaddrinfo(result);
 
-    if (sockfd == -1) {
+    if(sockfd == -1) {
         perror("connect");
     }
 
@@ -77,13 +77,11 @@ static int send_all(int sockfd, const void *buffer, size_t length)
 {
     size_t total_sent = 0;
 
-    while (total_sent < length) {
-        ssize_t bytes_sent;
+    while(total_sent < length) {
+        ssize_t bytes_sent = send(sockfd, (const uint8_t *)buffer + total_sent, length - total_sent, MSG_NOSIGNAL);
 
-        bytes_sent = send(sockfd, (const uint8_t *)buffer + total_sent, length - total_sent, MSG_NOSIGNAL);
-
-        if (bytes_sent == -1) {
-            if (errno == EINTR) {
+        if(bytes_sent < 0) {
+            if(errno == EINTR) {
                 continue;
             }
 
@@ -91,7 +89,7 @@ static int send_all(int sockfd, const void *buffer, size_t length)
             return -1;
         }
 
-        if (bytes_sent == 0) {
+        if(bytes_sent == 0) {
             return -1;
         }
 
@@ -107,36 +105,23 @@ static int send_get_id(int sockfd, uint16_t id)
 
     command[0] = SYNC_BYTE;
     command[1] = SELECTION_BYTE_GETID;
+
     memcpy(&command[2], &id, sizeof(id));
 
     return send_all(sockfd, command, sizeof(command));
 }
 
-static ssize_t receive_response(int sockfd, char *buffer, size_t buffer_size)
-{
-    ssize_t bytes_received;
-
-    do {
-        bytes_received = recv(sockfd, buffer, buffer_size - 1, 0);
-    } while (bytes_received == -1 && errno == EINTR);
-
-    if (bytes_received == -1) {
-        perror("recv");
-        return -1;
-    }
-
-    if (bytes_received > 0) {
-        buffer[bytes_received] = '\0';
-    }
-
-    return bytes_received;
-}
-
 static int parse_latency_response(const char *response, int64_t *sent_seconds, int64_t *sent_nanoseconds)
 {
-    if(sscanf(response, "LATENCY: %lld %lld", (long long *)sent_seconds, (long long *)sent_nanoseconds) != 2) {
+    long long seconds;
+    long long nanoseconds;
+
+    if(sscanf(response, "LATENCY: %lld %lld", &seconds, &nanoseconds) != 2) {
         return -1;
     }
+
+    *sent_seconds = (int64_t)seconds;
+    *sent_nanoseconds = (int64_t)nanoseconds;
 
     return 0;
 }
@@ -144,73 +129,132 @@ static int parse_latency_response(const char *response, int64_t *sent_seconds, i
 static void log_latency(FILE *file, int64_t sent_seconds, int64_t sent_nanoseconds)
 {
     struct timespec now;
-    int64_t sent_time_ns;
-    int64_t current_time_ns;
-    int64_t latency_ns;
+    int64_t sent_time_us;
+    int64_t current_time_us;
+    int64_t latency_us;
 
-    if(clock_gettime(CLOCK_MONOTONIC, &now) == -1) {
+    if(clock_gettime(CLOCK_REALTIME, &now) == -1) {
         return;
     }
 
-    sent_time_ns = sent_seconds * 1000000000LL + sent_nanoseconds;
-    current_time_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
-    latency_ns = current_time_ns - sent_time_ns;
+    sent_time_us = sent_seconds * 1000000LL + sent_nanoseconds / 1000LL;
+    current_time_us = (int64_t)now.tv_sec * 1000000LL + now.tv_nsec / 1000LL;
+    latency_us = current_time_us - sent_time_us;
 
-    fprintf(file, "%lld,%lld,%lld,%ld,%lld\n", (long long)sent_seconds, (long long)sent_nanoseconds, (long long)now.tv_sec, now.tv_nsec, (long long)latency_ns);
+    fprintf(file, "%lld\n", (long long)latency_us);
     fflush(file);
+}
 
-    printf("Latency: %lld ns (%.3f ms)\n", (long long)latency_ns, (double)latency_ns / 1000000.0);
+static int process_line(const char *line, int print_response, FILE *latency_file)
+{
+    int64_t sent_seconds;
+    int64_t sent_nanoseconds;
+
+    if(strcmp(line, "END") == 0) {
+        return 1;
+    }
+
+    if(print_response) {
+        printf("%s\n", line);
+    }
+
+    if(latency_file != NULL) {
+        if(parse_latency_response(line, &sent_seconds, &sent_nanoseconds) == 0) {
+            log_latency(latency_file, sent_seconds, sent_nanoseconds);
+        }
+    }
+
+    return 0;
+}
+
+static int receive_until_end(int sockfd, int print_response, FILE *latency_file)
+{
+    char buffer[TELEMETRY_BUFFER_SIZE];
+    char line[TELEMETRY_BUFFER_SIZE];
+    size_t line_length = 0;
+
+    while(1) {
+        ssize_t bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
+
+        if(bytes_received == 0) {
+            return -1;
+        }
+
+        if(bytes_received < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+
+            perror("recv");
+            return -1;
+        }
+
+        for(ssize_t i = 0; i < bytes_received; i++) {
+            if(buffer[i] == '\n') {
+                int result;
+
+                line[line_length] = '\0';
+                result = process_line(line, print_response, latency_file);
+                line_length = 0;
+
+                if(result == 1) {
+                    return 0;
+                }
+            }
+            else {
+                if(line_length >= sizeof(line) - 1) {
+                    return -1;
+                }
+
+                line[line_length++] = buffer[i];
+            }
+        }
+    }
 }
 
 static void *latency_receiver_thread(void *arg)
 {
     receiver_args_t *args = arg;
-    int sockfd;
     FILE *latency_file;
-
-    sockfd = connect_to_server(args->server_ip, args->server_port);
-
-    if(sockfd == -1) {
-        return NULL;
-    }
 
     latency_file = fopen(LATENCY_LOG_FILE, "w");
 
     if(latency_file == NULL) {
         perror("fopen");
-        close(sockfd);
         return NULL;
     }
 
-    fprintf(latency_file, "sent_seconds,sent_nanoseconds,current_seconds,current_nanoseconds,latency_nanoseconds\n");
-    printf("Latency receiver started\n");
+    fprintf(latency_file, "latency_microseconds\n");
+    fflush(latency_file);
 
     while(1) {
-        char buffer[TELEMETRY_BUFFER_SIZE];
-        ssize_t bytes_received;
-        int64_t sent_seconds;
-        int64_t sent_nanoseconds;
+        int sockfd = connect_to_server(args->server_ip, args->server_port);
+
+        if(sockfd == -1) {
+            usleep(100000);
+            continue;
+        }
 
         if(send_get_id(sockfd, LATENCY_SENSOR_ID) == -1) {
-            fclose(latency_file);
             close(sockfd);
-            return NULL;
+            usleep(100000);
+            continue;
         }
 
-        bytes_received = receive_response(sockfd, buffer, sizeof(buffer));
-
-        if(bytes_received <= 0) {
-            fclose(latency_file);
+        if(receive_until_end(sockfd, 0, latency_file) == -1) {
             close(sockfd);
-            return NULL;
+            usleep(100000);
+            continue;
         }
 
-        if(parse_latency_response(buffer, &sent_seconds, &sent_nanoseconds) == 0) {
-            log_latency(latency_file, sent_seconds, sent_nanoseconds);
-        }
+        close(sockfd);
 
-        usleep(1000);
+        usleep(10000);
     }
+
+    fclose(latency_file);
+
+    return NULL;
 }
 
 static int send_user_command(int sockfd, const char *command)
@@ -219,19 +263,19 @@ static int send_user_command(int sockfd, const char *command)
     uint16_t id;
     uint8_t type;
 
-    if (strcmp(command, "GET ALL\n") == 0) {
+    if(strcmp(command, "GET ALL\n") == 0) {
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETALL;
         return send_all(sockfd, packet, 2);
     }
 
-    if (strcmp(command, "GET ONLINE\n") == 0) {
+    if(strcmp(command, "GET ONLINE\n") == 0) {
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETONLINE;
         return send_all(sockfd, packet, 2);
     }
 
-    if (strcmp(command, "GET OFFLINE\n") == 0) {
+    if(strcmp(command, "GET OFFLINE\n") == 0) {
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETOFFLINE;
         return send_all(sockfd, packet, 2);
@@ -250,21 +294,22 @@ static int send_user_command(int sockfd, const char *command)
 
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETID;
+
         memcpy(&packet[2], &id, sizeof(id));
 
         return send_all(sockfd, packet, 4);
     }
 
-    if (strcmp(command, "GET TYPE POWCURRVOLT\n") == 0) {
+    if(strcmp(command, "GET TYPE POWCURRVOLT\n") == 0) {
         type = 0x2B;
     }
-    else if (strcmp(command, "GET TYPE TOR\n") == 0) {
+    else if(strcmp(command, "GET TYPE TOR\n") == 0) {
         type = 0x4B;
     }
-    else if (strcmp(command, "GET TYPE TEMPRESS\n") == 0) {
+    else if(strcmp(command, "GET TYPE TEMPRESS\n") == 0) {
         type = 0x1B;
     }
-    else if (strcmp(command, "GET TYPE PROX\n") == 0) {
+    else if(strcmp(command, "GET TYPE PROX\n") == 0) {
         type = 0x8B;
     }
     else {
@@ -287,7 +332,7 @@ int main(int argc, char *argv[])
     pthread_t latency_thread;
     char command[256];
 
-    if (argc != 3) {
+    if(argc != 3) {
         fprintf(stderr, "Usage: %s <QEMU_IP> <TELEMETRY_PORT>\n", argv[0]);
         return EXIT_FAILURE;
     }
@@ -298,7 +343,7 @@ int main(int argc, char *argv[])
     args.server_ip = server_ip;
     args.server_port = server_port;
 
-    if (pthread_create(&latency_thread, NULL, latency_receiver_thread, &args) != 0) {
+    if(pthread_create(&latency_thread, NULL, latency_receiver_thread, &args) != 0) {
         perror("pthread_create");
         return EXIT_FAILURE;
     }
@@ -313,35 +358,29 @@ int main(int argc, char *argv[])
     printf("GET OFFLINE\n");
     printf("GET ID <Sensor_ID>\n");
 
-    while (1) {
+    while(1) {
         int sockfd;
-        char buffer[TELEMETRY_BUFFER_SIZE];
-        ssize_t bytes_received;
 
         printf("> ");
+        fflush(stdout);
 
-        if (fgets(command, sizeof(command), stdin) == NULL) {
+        if(fgets(command, sizeof(command), stdin) == NULL) {
             break;
         }
 
         sockfd = connect_to_server(server_ip, server_port);
 
-        if (sockfd == -1) {
+        if(sockfd == -1) {
             continue;
         }
 
-        if (send_user_command(sockfd, command) == -1) {
+        if(send_user_command(sockfd, command) == -1) {
             close(sockfd);
             continue;
         }
 
-        while((bytes_received = receive_response(sockfd, buffer, sizeof(buffer))) > 0) {
-            printf("%s", buffer);
-        }
-
-        if(bytes_received < 0) {
-            close(sockfd);
-            continue;
+        if(receive_until_end(sockfd, 1, NULL) == -1) {
+            fprintf(stderr, "Failed to receive complete response\n");
         }
 
         close(sockfd);

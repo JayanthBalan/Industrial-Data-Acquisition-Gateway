@@ -1,3 +1,4 @@
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <pthread.h>
@@ -15,7 +16,7 @@
 #define MAX_DATA_SIZE 12
 #define MAX_PACKET_SIZE (PACKET_HEADER_SIZE + MAX_DATA_SIZE)
 
-#define LATENCY_SENSOR_ID 65000
+#define LATENCY_SENSOR_ID 0xFDE8U
 #define LATENCY_SENSOR_TYPE 0x2B
 
 typedef struct {
@@ -229,68 +230,47 @@ static void *latency_client_thread(void *arg)
 
     sockfd = connect_to_server(args->server_ip, args->server_port);
 
-    if (sockfd == -1) {
+    if(sockfd == -1) {
         fprintf(stderr, "Latency client failed to connect\n");
         return NULL;
     }
 
     printf("Latency client connected to %s:%d\n", args->server_ip, args->server_port);
 
-    while (1) {
+    while(1) {
         struct timespec now;
-        struct tm local_time;
         uint8_t data[12];
         uint8_t packet[MAX_PACKET_SIZE];
-        uint32_t microseconds;
-        uint32_t seconds_since_midnight;
+        int64_t seconds;
+        int32_t nanoseconds;
         size_t packet_length;
 
-        if (clock_gettime(CLOCK_REALTIME, &now) == -1) {
+        if(clock_gettime(CLOCK_REALTIME, &now) == -1) {
             perror("clock_gettime");
             close(sockfd);
             return NULL;
         }
 
-        if (localtime_r(&now.tv_sec, &local_time) == NULL) {
-            perror("localtime_r");
-            close(sockfd);
-            return NULL;
-        }
+        seconds = (int64_t)now.tv_sec;
+        nanoseconds = (int32_t)now.tv_nsec;
 
-        microseconds = (uint32_t)(now.tv_nsec / 1000);
-
-        seconds_since_midnight = (uint32_t)(local_time.tm_hour * 3600 + local_time.tm_min * 60 + local_time.tm_sec);
-
-        data[0] = (uint8_t)(seconds_since_midnight & 0xFF);
-        data[1] = (uint8_t)((seconds_since_midnight >> 8) & 0xFF);
-        data[2] = (uint8_t)((seconds_since_midnight >> 16) & 0xFF);
-        data[3] = (uint8_t)((seconds_since_midnight >> 24) & 0xFF);
-
-        data[4] = (uint8_t)(microseconds & 0xFF);
-        data[5] = (uint8_t)((microseconds >> 8) & 0xFF);
-        data[6] = (uint8_t)((microseconds >> 16) & 0xFF);
-        data[7] = (uint8_t)((microseconds >> 24) & 0xFF);
-
-        data[8] = 0;
-        data[9] = 0;
-        data[10] = 0;
-        data[11] = 0;
+        memcpy(&data[0], &seconds, sizeof(seconds));
+        memcpy(&data[8], &nanoseconds, sizeof(nanoseconds));
 
         packet_length = build_packet(LATENCY_SENSOR_TYPE, LATENCY_SENSOR_ID, data, sizeof(data), packet);
 
-        if (send_all(sockfd, packet, packet_length) == -1) {
+        if(send_all(sockfd, packet, packet_length) == -1) {
             fprintf(stderr, "Latency client connection lost\n");
             close(sockfd);
             return NULL;
         }
 
-        printf("Latency packet sent: ID=%d time=%02d:%02d:%02d.%06u\n", LATENCY_SENSOR_ID, local_time.tm_hour, local_time.tm_min, local_time.tm_sec, microseconds);
+        printf("Latency packet sent: ID=0x%04X time=%lld.%09d\n", LATENCY_SENSOR_ID, (long long)seconds, nanoseconds);
 
-        sleep(1);
+        sleep(5);
     }
 
     close(sockfd);
-
     return NULL;
 }
 

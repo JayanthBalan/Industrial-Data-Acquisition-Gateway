@@ -11,6 +11,7 @@
 #define BACKLOG 10
 #define CLIENT_ACCEPT_FAILURE_LIMIT_MAX 16
 #define RX_MQ_NAME "/mq-process-telemetry"
+#define RESPONSE_END_MARKER "END\n"
 
 #define SYNC_BYTE 0xAAU
 #define SYNC_BYTE_SIZE 1
@@ -48,6 +49,7 @@ static int giveSensorAll_Type(uint8_t, int);
 static int giveSensorAll_Online(int);
 static int giveSensorAll_Offline(int);
 static int giveSensorAll(int);
+static int sendResponseEnd(int);
 
 int main(void) {
     openlog(__FILE__, LOG_PID | LOG_CONS, LOG_DAEMON);
@@ -184,6 +186,32 @@ int main(void) {
     mq_close(rx_process_mq);
     pthread_mutex_destroy(&registry_mutex);
     closelog();
+    return 0;
+}
+
+static int sendResponseEnd(int socket_fd) {
+    const char *ptr = RESPONSE_END_MARKER;
+    size_t length = strlen(RESPONSE_END_MARKER);
+
+    while(length > 0) {
+        ssize_t bytes_sent = send(socket_fd, ptr, length, MSG_NOSIGNAL);
+
+        if(bytes_sent == 0) {
+            return -1;
+        }
+
+        if(bytes_sent < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+
+            return -1;
+        }
+
+        ptr += bytes_sent;
+        length -= (size_t)bytes_sent;
+    }
+
     return 0;
 }
 
@@ -336,7 +364,8 @@ static void *userHandler(void *arg) {
             Sensor_t target_sensor = getSensor_ID(call_id, sensor_registry, sensor_count);
             pthread_mutex_unlock(&registry_mutex);
 
-            if(giveSensor(target_sensor, client_fd) == -1) {
+            if(giveSensor(target_sensor, client_fd) == -1 ||
+                sendResponseEnd(client_fd) == -1) {
                 syslog(LOG_ERR, "send() Failed");
                 break;
             }
@@ -391,41 +420,67 @@ static void *userHandler(void *arg) {
 static int giveSensorAll_Offline(int fd) {
     pthread_mutex_lock(&registry_mutex);
 
-    for(size_t idx = 0; idx < sensor_count; idx++) {
-        if(sensor_registry[idx].state == SENSOR_OFFLINE) {
-            Sensor_t target_sensor = sensor_registry[idx];
+    size_t count = sensor_count;
+    Sensor_t *snapshot = NULL;
+
+    if(count > 0) {
+        snapshot = malloc(sizeof(Sensor_t) * count);
+
+        if(snapshot == NULL) {
             pthread_mutex_unlock(&registry_mutex);
-
-            if(giveSensor(target_sensor, fd) == -1) {
-                return -1;
-            }
-
-            pthread_mutex_lock(&registry_mutex);
+            return -1;
         }
+
+        memcpy(snapshot, sensor_registry, sizeof(Sensor_t) * count);
     }
 
     pthread_mutex_unlock(&registry_mutex);
-    return 0;
+
+    for(size_t idx = 0; idx < count; idx++) {
+        if(snapshot[idx].state == SENSOR_OFFLINE) {
+            if(giveSensor(snapshot[idx], fd) == -1) {
+                free(snapshot);
+                return -1;
+            }
+        }
+    }
+
+    free(snapshot);
+
+    return sendResponseEnd(fd);
 }
 
 static int giveSensorAll_Online(int fd) {
     pthread_mutex_lock(&registry_mutex);
 
-    for(size_t idx = 0; idx < sensor_count; idx++) {
-        if(sensor_registry[idx].state == SENSOR_ONLINE) {
-            Sensor_t target_sensor = sensor_registry[idx];
+    size_t count = sensor_count;
+    Sensor_t *snapshot = NULL;
+
+    if(count > 0) {
+        snapshot = malloc(sizeof(Sensor_t) * count);
+
+        if(snapshot == NULL) {
             pthread_mutex_unlock(&registry_mutex);
-
-            if(giveSensor(target_sensor, fd) == -1) {
-                return -1;
-            }
-
-            pthread_mutex_lock(&registry_mutex);
+            return -1;
         }
+
+        memcpy(snapshot, sensor_registry, sizeof(Sensor_t) * count);
     }
 
     pthread_mutex_unlock(&registry_mutex);
-    return 0;
+
+    for(size_t idx = 0; idx < count; idx++) {
+        if(snapshot[idx].state == SENSOR_ONLINE) {
+            if(giveSensor(snapshot[idx], fd) == -1) {
+                free(snapshot);
+                return -1;
+            }
+        }
+    }
+
+    free(snapshot);
+
+    return sendResponseEnd(fd);
 }
 
 static int giveSensorAll_Type(uint8_t type_byte, int fd) {
@@ -438,25 +493,39 @@ static int giveSensorAll_Type(uint8_t type_byte, int fd) {
 
     pthread_mutex_lock(&registry_mutex);
 
-    for(size_t idx = 0; idx < sensor_count; idx++) {
-        if(sensor_registry[idx].type == type) {
-            Sensor_t target_sensor = sensor_registry[idx];
+    size_t count = sensor_count;
+    Sensor_t *snapshot = NULL;
+
+    if(count > 0) {
+        snapshot = malloc(sizeof(Sensor_t) * count);
+
+        if(snapshot == NULL) {
             pthread_mutex_unlock(&registry_mutex);
-
-            if(giveSensor(target_sensor, fd) == -1) {
-                return -1;
-            }
-
-            pthread_mutex_lock(&registry_mutex);
+            return -1;
         }
+
+        memcpy(snapshot, sensor_registry, sizeof(Sensor_t) * count);
     }
 
     pthread_mutex_unlock(&registry_mutex);
-    return 0;
+
+    for(size_t idx = 0; idx < count; idx++) {
+        if(snapshot[idx].type == type) {
+            if(giveSensor(snapshot[idx], fd) == -1) {
+                free(snapshot);
+                return -1;
+            }
+        }
+    }
+
+    free(snapshot);
+
+    return sendResponseEnd(fd);
 }
 
 static int giveSensorAll(int fd) {
     pthread_mutex_lock(&registry_mutex);
+
     size_t count = sensor_count;
     Sensor_t *snapshot = NULL;
 
@@ -481,7 +550,8 @@ static int giveSensorAll(int fd) {
     }
 
     free(snapshot);
-    return 0;
+
+    return sendResponseEnd(fd);
 }
 
 static int giveSensor(Sensor_t target, int socket_fd) {
