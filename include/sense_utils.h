@@ -6,7 +6,7 @@
 
 // processing_d functions
 void nameSensor(char*, uint16_t, SensorType_e);
-int recordSensorData(SensorData_u*, uint8_t*, uint16_t, SensorType_e);
+int recordSensorData(SensorData_u*, const uint8_t*, uint16_t, SensorType_e);
 
 // logging_d function
 int writeFrameData(SensorData_u, SensorType_e, sensor_timespec_t, uint8_t, int);

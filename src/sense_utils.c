@@ -45,7 +45,7 @@ void nameSensor(char *string, uint16_t id, SensorType_e type) {
     snprintf(string, string_size, "%s_0X%" PRIx16, name_base, id);
 }
 
-int recordSensorData(SensorData_u *target, uint8_t *raw_data, uint16_t byte_size, SensorType_e type) {
+int recordSensorData(SensorData_u *target, const uint8_t *raw_data, uint16_t byte_size, SensorType_e type) {
     uint16_t idx = 0;
     uint32_t value;
 
