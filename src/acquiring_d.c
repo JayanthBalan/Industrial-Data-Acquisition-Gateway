@@ -1,3 +1,4 @@
+
 #include "process_init.h"
 #include <sys/socket.h>
 #include <netdb.h>
@@ -149,16 +150,18 @@ static void *socketConnectionHandler(void *arg) {
             break;
         }
 
-        bytes_read = socket_recv(client_fd, &msg_buffer[PACKET_HEADER_FIELDS_SIZE], msg_data_len);
+        if (msg_data_len > 0) {
+            bytes_read = socket_recv(client_fd, &msg_buffer[PACKET_HEADER_FIELDS_SIZE], msg_data_len);
 
-        if (bytes_read == 0) {
-            syslog(LOG_INFO, "Client %d Disconnected", client_fd);
-            break;
-        }
+            if (bytes_read == 0) {
+                syslog(LOG_INFO, "Client %d Disconnected", client_fd);
+                break;
+            }
 
-        if (bytes_read < 0) {
-            syslog(LOG_ERR, "recv(message data) Failed: %s", strerror(errno));
-            break;
+            if (bytes_read < 0) {
+                syslog(LOG_ERR, "recv(message data) Failed: %s", strerror(errno));
+                break;
+            }
         }
 
         syslog(LOG_INFO, "Received packet Type=%02X ID=%u Length=%u", msg_buffer[1], (unsigned int)((uint16_t)msg_buffer[2] | ((uint16_t)msg_buffer[3] << 8)), (unsigned int)msg_data_len);
