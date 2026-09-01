@@ -1,5 +1,5 @@
 
-INDUSTRIAL_DATA_ACQUISITION_GATEWAY_VERSION = ef42b9f2dc24d48da6dd9e2273538261769be5a1
+INDUSTRIAL_DATA_ACQUISITION_GATEWAY_VERSION = bd7255dee74bb5c688fe87ebc6b18258b58aba5e
 INDUSTRIAL_DATA_ACQUISITION_GATEWAY_SITE = git@github.com:JayanthBalan/Industrial-Data-Acquisition-Gateway.git
 INDUSTRIAL_DATA_ACQUISITION_GATEWAY_SITE_METHOD = git
 INDUSTRIAL_DATA_ACQUISITION_GATEWAY_GIT_SUBMODULES = YES
@@ -16,6 +16,7 @@ define INDUSTRIAL_DATA_ACQUISITION_GATEWAY_INSTALL_TARGET_CMDS
 	$(INSTALL) -m 0755 $(@D)/builder/loggingd $(TARGET_DIR)/usr/bin/loggingd
 	$(INSTALL) -m 0755 $(@D)/builder/telemetryd $(TARGET_DIR)/usr/bin/telemetryd
 
+	$(INSTALL) -m 0755 $(@D)/network-start-stop $(TARGET_DIR)/etc/init.d/S97network
 	$(INSTALL) -m 0755 $(@D)/daemons4d-start-stop $(TARGET_DIR)/etc/init.d/S99daemons4d
 	$(INSTALL) -m 0755 $(@D)/mount1q-start-stop $(TARGET_DIR)/etc/init.d/S98mount-mqueue
 endef

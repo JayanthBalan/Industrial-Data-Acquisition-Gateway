@@ -1,0 +1,14 @@
+
+
+#!/bin/sh
+
+case "$1" in
+    start)
+        ip link set eth0 up
+        udhcpc -i eth0
+        ;;
+    stop)
+        ;;
+esac
+
+exit 0

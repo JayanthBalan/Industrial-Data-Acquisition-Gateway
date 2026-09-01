@@ -1,4 +1,3 @@
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <pthread.h>
@@ -27,9 +26,17 @@ typedef struct {
     int is_latency_thread;
 } thread_args_t;
 
-static int connect_to_server(const char *ip, int port) {
+static int connect_to_server(const char *ip, int port);
+static int send_all(int sockfd, const uint8_t *buffer, size_t length);
+static size_t build_packet(uint8_t type, uint16_t id, const uint8_t *data, uint16_t data_length, uint8_t *packet);
+static void *normal_client_thread(void *arg);
+static void *latency_client_thread(void *arg);
+
+static int connect_to_server(const char *ip, int port)
+{
     int sockfd;
     struct sockaddr_in server_addr;
+
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd == -1) {
         perror("socket");
@@ -55,12 +62,19 @@ static int connect_to_server(const char *ip, int port) {
     return sockfd;
 }
 
-static int send_all(int sockfd, const uint8_t *buffer, size_t length) {
+static int send_all(int sockfd, const uint8_t *buffer, size_t length)
+{
     size_t total_sent = 0;
 
     while (total_sent < length) {
         ssize_t bytes_sent = send(sockfd, buffer + total_sent, length - total_sent, 0);
-        if (bytes_sent == -1) {
+
+        if (bytes_sent == 0) {
+            fprintf(stderr, "send() returned 0\n");
+            return -1;
+        }
+
+        if (bytes_sent < 0) {
             if (errno == EINTR) {
                 continue;
             }
@@ -68,13 +82,15 @@ static int send_all(int sockfd, const uint8_t *buffer, size_t length) {
             perror("send");
             return -1;
         }
+
         total_sent += (size_t)bytes_sent;
     }
 
     return 0;
 }
 
-static size_t build_packet(uint8_t type, uint16_t id, const uint8_t *data, uint16_t data_length, uint8_t *packet) {
+static size_t build_packet(uint8_t type, uint16_t id, const uint8_t *data, uint16_t data_length, uint8_t *packet)
+{
     packet[0] = SYNC_FIELD;
     packet[1] = type;
     packet[2] = (uint8_t)(id & 0xFF);
@@ -82,11 +98,15 @@ static size_t build_packet(uint8_t type, uint16_t id, const uint8_t *data, uint1
     packet[4] = (uint8_t)(data_length & 0xFF);
     packet[5] = (uint8_t)((data_length >> 8) & 0xFF);
 
-    memcpy(&packet[PACKET_HEADER_SIZE], data, data_length);
+    if (data_length > 0) {
+        memcpy(packet + PACKET_HEADER_SIZE, data, data_length);
+    }
+
     return PACKET_HEADER_SIZE + data_length;
 }
 
-static void *normal_client_thread(void *arg) {
+static void *normal_client_thread(void *arg)
+{
     thread_args_t *args = arg;
     FILE *file;
     int sockfd;
@@ -94,8 +114,11 @@ static void *normal_client_thread(void *arg) {
 
     sockfd = connect_to_server(args->server_ip, args->server_port);
     if (sockfd == -1) {
+        fprintf(stderr, "Normal client %d failed to connect\n", args->thread_id);
         return NULL;
     }
+
+    printf("Normal client %d connected to %s:%d\n", args->thread_id, args->server_ip, args->server_port);
 
     file = fopen(args->data_file, "r");
     if (file == NULL) {
@@ -103,7 +126,6 @@ static void *normal_client_thread(void *arg) {
         close(sockfd);
         return NULL;
     }
-    printf("Normal client %d started\n", args->thread_id);
 
     while (1) {
         rewind(file);
@@ -111,67 +133,108 @@ static void *normal_client_thread(void *arg) {
         while (fgets(line, sizeof(line), file) != NULL) {
             uint8_t packet[MAX_PACKET_SIZE];
             uint8_t data[MAX_DATA_SIZE];
-            unsigned int type;
-            unsigned int id;
-            unsigned int byte;
+            unsigned long type_value;
+            unsigned long id_value;
+            unsigned long byte_value;
             uint16_t data_length = 0;
+            size_t packet_length;
             char *token;
+            char *endptr;
 
-            if (line[0] == '\n' || line[0] == '#') {
-                continue;
-            }
+            token = strtok(line, " \t\r\n");
 
-            token = strtok(line, " \t\n");
             if (token == NULL) {
                 continue;
             }
-            type = (unsigned int)strtoul(token, NULL, 16);
 
-            token = strtok(NULL, " \t\n");
-            if (token == NULL) {
+            if (token[0] == '#') {
                 continue;
             }
-            id = (unsigned int)strtoul(token, NULL, 10);
+
+            errno = 0;
+            type_value = strtoul(token, &endptr, 16);
+
+            if (errno != 0 || *endptr != '\0' || type_value > UINT8_MAX) {
+                fprintf(stderr, "Invalid sensor type\n");
+                continue;
+            }
+
+            token = strtok(NULL, " \t\r\n");
+            if (token == NULL) {
+                fprintf(stderr, "Missing sensor ID\n");
+                continue;
+            }
+
+            errno = 0;
+            id_value = strtoul(token, &endptr, 10);
+
+            if (errno != 0 || *endptr != '\0' || id_value > UINT16_MAX) {
+                fprintf(stderr, "Invalid sensor ID\n");
+                continue;
+            }
 
             while (data_length < MAX_DATA_SIZE) {
-                token = strtok(NULL, " \t\n");
+                token = strtok(NULL, " \t\r\n");
+
                 if (token == NULL) {
                     break;
                 }
 
-                byte = (unsigned int)strtoul(token, NULL, 16);
-                data[data_length] = (uint8_t)byte;
+                errno = 0;
+                byte_value = strtoul(token, &endptr, 16);
+
+                if (errno != 0 || *endptr != '\0' ||
+                    byte_value > UINT8_MAX) {
+                    fprintf(stderr, "Invalid data byte\n");
+                    data_length = 0;
+                    break;
+                }
+
+                data[data_length] = (uint8_t)byte_value;
                 data_length++;
             }
 
-            size_t packet_length;
-            packet_length = build_packet((uint8_t)type, (uint16_t)id, data, data_length, packet);
+            if (token != NULL && data_length == 0) {
+                continue;
+            }
 
+            packet_length = build_packet((uint8_t)type_value, (uint16_t)id_value, data, data_length, packet);
 
             if (send_all(sockfd, packet, packet_length) == -1) {
+                fprintf(stderr, "Normal client %d connection lost\n", args->thread_id);
+
                 fclose(file);
                 close(sockfd);
                 return NULL;
             }
-            printf("Normal client %d sent: Type=%02X ID=%u Length=%u\n", args->thread_id, type, id, data_length);
+
+            printf("Normal client %d sent: Type=%02lX ID=%lu Length=%u\n", args->thread_id, type_value, id_value, (unsigned int)data_length);
 
             usleep(100000);
         }
+
+        clearerr(file);
     }
 
     fclose(file);
     close(sockfd);
+
     return NULL;
 }
 
-static void *latency_client_thread(void *arg) {
+static void *latency_client_thread(void *arg)
+{
     thread_args_t *args = arg;
-    int sockfd = connect_to_server(args->server_ip, args->server_port);
+    int sockfd;
+
+    sockfd = connect_to_server(args->server_ip, args->server_port);
+
     if (sockfd == -1) {
+        fprintf(stderr, "Latency client failed to connect\n");
         return NULL;
     }
 
-    printf("Latency client started\n");
+    printf("Latency client connected to %s:%d\n", args->server_ip, args->server_port);
 
     while (1) {
         struct timespec now;
@@ -182,10 +245,20 @@ static void *latency_client_thread(void *arg) {
         uint32_t seconds_since_midnight;
         size_t packet_length;
 
-        clock_gettime(CLOCK_REALTIME, &now);
-        localtime_r(&now.tv_sec, &local_time);
+        if (clock_gettime(CLOCK_REALTIME, &now) == -1) {
+            perror("clock_gettime");
+            close(sockfd);
+            return NULL;
+        }
+
+        if (localtime_r(&now.tv_sec, &local_time) == NULL) {
+            perror("localtime_r");
+            close(sockfd);
+            return NULL;
+        }
 
         microseconds = (uint32_t)(now.tv_nsec / 1000);
+
         seconds_since_midnight = (uint32_t)(local_time.tm_hour * 3600 + local_time.tm_min * 60 + local_time.tm_sec);
 
         data[0] = (uint8_t)(seconds_since_midnight & 0xFF);
@@ -205,47 +278,62 @@ static void *latency_client_thread(void *arg) {
 
         packet_length = build_packet(LATENCY_SENSOR_TYPE, LATENCY_SENSOR_ID, data, sizeof(data), packet);
 
-        printf("Latency packet sent: ID=%d time=%02d:%02d:%02d.%06u\n", LATENCY_SENSOR_ID, local_time.tm_hour, local_time.tm_min, local_time.tm_sec, microseconds);
-
         if (send_all(sockfd, packet, packet_length) == -1) {
+            fprintf(stderr, "Latency client connection lost\n");
             close(sockfd);
             return NULL;
         }
+
+        printf("Latency packet sent: ID=%d time=%02d:%02d:%02d.%06u\n", LATENCY_SENSOR_ID, local_time.tm_hour, local_time.tm_min, local_time.tm_sec, microseconds);
 
         sleep(1);
     }
 
     close(sockfd);
+
     return NULL;
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
+    const char *server_ip;
+    int server_port;
+    const char *data_file;
+    int number_of_clients;
+    pthread_t *threads;
+    thread_args_t *args;
+
     if (argc != 5) {
-        fprintf(stderr, "Usage: %s <QEMU_IP> " "<PORT> " "<DATA_FILE> " "<NUMBER_OF_CLIENTS>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <QEMU_IP> <PORT> <DATA_FILE> <NUMBER_OF_CLIENTS>\n", argv[0]);
+
         return EXIT_FAILURE;
     }
 
-    const char *server_ip = argv[1];
-    int server_port = atoi(argv[2]);
-    const char *data_file = argv[3];
-    int number_of_clients = atoi(argv[4]);
+    server_ip = argv[1];
+    server_port = atoi(argv[2]);
+    data_file = argv[3];
+    number_of_clients = atoi(argv[4]);
+
+    if (server_port < 1 || server_port > 65535) {
+        fprintf(stderr, "PORT must be between 1 and 65535\n");
+        return EXIT_FAILURE;
+    }
 
     if (number_of_clients < 1) {
         fprintf(stderr, "NUMBER_OF_CLIENTS must be at least 1\n");
+
         return EXIT_FAILURE;
     }
 
-
-    pthread_t *threads;
-    thread_args_t *args;
-    threads = calloc((size_t)number_of_clients, sizeof(pthread_t));
-    args = calloc((size_t)number_of_clients, sizeof(thread_args_t));
-
+    threads = calloc((size_t)number_of_clients, sizeof(*threads));
+    args = calloc((size_t)number_of_clients, sizeof(*args));
 
     if (threads == NULL || args == NULL) {
         perror("calloc");
+
         free(threads);
         free(args);
+
         return EXIT_FAILURE;
     }
 
@@ -255,11 +343,12 @@ int main(int argc, char *argv[]) {
     args[0].thread_id = 0;
     args[0].is_latency_thread = 1;
 
-
     if (pthread_create(&threads[0], NULL, latency_client_thread, &args[0]) != 0) {
         perror("pthread_create");
+
         free(threads);
         free(args);
+
         return EXIT_FAILURE;
     }
 
@@ -272,7 +361,6 @@ int main(int argc, char *argv[]) {
 
         if (pthread_create(&threads[i], NULL, normal_client_thread, &args[i]) != 0) {
             perror("pthread_create");
-            continue;
         }
     }
 
@@ -282,5 +370,6 @@ int main(int argc, char *argv[]) {
 
     free(threads);
     free(args);
+
     return EXIT_SUCCESS;
 }
