@@ -49,70 +49,45 @@ void nameSensor(char *string, uint16_t id, SensorType_e type) {
 }
 
 int recordSensorData(SensorData_u *target, const uint8_t *raw_data, uint16_t byte_size, SensorType_e type) {
-    uint16_t idx = 0;
-    uint32_t value;
-
     if(target == NULL || raw_data == NULL) {
         return -1;
     }
 
-    if(type == SENSOR_TYPE_POWCURRVOLT) {
-        if(byte_size != 12) {
+    switch(type) {
+        case SENSOR_TYPE_POWCURRVOLT:
+            if(byte_size != 12) {
+                return -1;
+            }
+            target->powcurrvolt.power = (int32_t)((uint32_t)raw_data[0] | ((uint32_t)raw_data[1] << 8) | ((uint32_t)raw_data[2] << 16) | ((uint32_t)raw_data[3] << 24));
+            target->powcurrvolt.current = (int32_t)((uint32_t)raw_data[4] | ((uint32_t)raw_data[5] << 8) | ((uint32_t)raw_data[6] << 16) | ((uint32_t)raw_data[7] << 24));
+            target->powcurrvolt.voltage = (int32_t)((uint32_t)raw_data[8] | ((uint32_t)raw_data[9] << 8) | ((uint32_t)raw_data[10] << 16) | ((uint32_t)raw_data[11] << 24));
+            return 0;
+
+        case SENSOR_TYPE_TEMPPRESS:
+            if(byte_size != 8) {
+                return -1;
+            }
+            target->temppress.temperature = (int32_t)((uint32_t)raw_data[0] | ((uint32_t)raw_data[1] << 8) | ((uint32_t)raw_data[2] << 16) | ((uint32_t)raw_data[3] << 24));
+            target->temppress.pressure = (uint32_t)raw_data[4] | ((uint32_t)raw_data[5] << 8) | ((uint32_t)raw_data[6] << 16) | ((uint32_t)raw_data[7] << 24);
+            return 0;
+
+        case SENSOR_TYPE_PROXIMITY:
+            if(byte_size != 4) {
+                return -1;
+            }
+            target->prox.proximity = (uint32_t)raw_data[0] | ((uint32_t)raw_data[1] << 8) | ((uint32_t)raw_data[2] << 16) | ((uint32_t)raw_data[3] << 24);
+            return 0;
+
+        case SENSOR_TYPE_TORQUE:
+            if(byte_size != 4) {
+                return -1;
+            }
+            target->tor.torque = (int32_t)((uint32_t)raw_data[0] | ((uint32_t)raw_data[1] << 8) | ((uint32_t)raw_data[2] << 16) | ((uint32_t)raw_data[3] << 24));
+            return 0;
+
+        default:
             return -1;
-        }
-
-        value = (uint32_t)raw_data[idx] | ((uint32_t)raw_data[idx + 1] << 8) | ((uint32_t)raw_data[idx + 2] << 16) | ((uint32_t)raw_data[idx + 3] << 24);
-        target->powcurrvolt.power = (int32_t)value;
-        idx += 4;
-
-        value = (uint32_t)raw_data[idx] | ((uint32_t)raw_data[idx + 1] << 8) | ((uint32_t)raw_data[idx + 2] << 16) | ((uint32_t)raw_data[idx + 3] << 24);
-        target->powcurrvolt.current = (int32_t)value;
-        idx += 4;
-
-        value = (uint32_t)raw_data[idx] | ((uint32_t)raw_data[idx + 1] << 8) | ((uint32_t)raw_data[idx + 2] << 16) | ((uint32_t)raw_data[idx + 3] << 24);
-        target->powcurrvolt.voltage = (int32_t)value;
-        idx += 4;
     }
-    else if(type == SENSOR_TYPE_TEMPPRESS) {
-        if(byte_size != 8) {
-            return -1;
-        }
-
-        value = (uint32_t)raw_data[idx] | ((uint32_t)raw_data[idx + 1] << 8) | ((uint32_t)raw_data[idx + 2] << 16) | ((uint32_t)raw_data[idx + 3] << 24);
-        target->temppress.temperature = (int32_t)value;
-        idx += 4;
-
-        value = (uint32_t)raw_data[idx] | ((uint32_t)raw_data[idx + 1] << 8) | ((uint32_t)raw_data[idx + 2] << 16) | ((uint32_t)raw_data[idx + 3] << 24);
-        target->temppress.pressure = value;
-        idx += 4;
-    }
-    else if(type == SENSOR_TYPE_PROXIMITY) {
-        if(byte_size != 4) {
-            return -1;
-        }
-
-        value = (uint32_t)raw_data[idx] | ((uint32_t)raw_data[idx + 1] << 8) | ((uint32_t)raw_data[idx + 2] << 16) | ((uint32_t)raw_data[idx + 3] << 24);
-        target->prox.proximity = value;
-        idx += 4;
-    }
-    else if(type == SENSOR_TYPE_TORQUE) {
-        if(byte_size != 4) {
-            return -1;
-        }
-
-        value = (uint32_t)raw_data[idx] | ((uint32_t)raw_data[idx + 1] << 8) | ((uint32_t)raw_data[idx + 2] << 16) | ((uint32_t)raw_data[idx + 3] << 24);
-        target->tor.torque = (int32_t)value;
-        idx += 4;
-    }
-    else {
-        return -1;
-    }
-
-    if(idx != byte_size) {
-        return -1;
-    }
-
-    return 0;
 }
 
 int writeFrameData(SensorData_u data, SensorType_e type, sensor_timespec_t stamp, uint8_t flag, int fd) {
@@ -226,7 +201,18 @@ int updateRegistry(Sensor_t *source, Sensor_t *target) {
         return -1;
     }
 
-    *target = *source;
+    if(source->frame_type == SENSOR_DATA) {
+        target->data = source->data;
+        target->timestamp = source->timestamp;
+    }
+
+    target->last_seen_time = source->last_seen_time;
+    target->id = source->id;
+    target->type = source->type;
+    target->state = SENSOR_ONLINE;
+    target->frame_type = source->frame_type;
+    memcpy(target->name, source->name, SENSOR_NAME_SIZE);
+
     return 0;
 }
 
