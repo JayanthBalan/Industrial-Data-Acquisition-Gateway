@@ -90,39 +90,52 @@ mq_receive_retry:
     return bytes_read;
 }
 
-static int openLogFile(Sensor_t *frame, uint8_t *flag) {
+static int openLogFile(Sensor_t *frame, uint8_t *flag)
+{
     char filename[FILENAME_SIZE] = "";
 
-    if(snprintf(filename, sizeof(filename), "%s%s%s", filepath, frame->name, filename_extension) >= (int)sizeof(filename)) {
+    if (snprintf(filename, sizeof(filename), "%s%s%s", filepath, frame->name, filename_extension) >= (int)sizeof(filename))
+    {
         syslog(LOG_ERR, "Log filename too long");
         return -1;
     }
 
     int file_descriptor;
+
 retry_open:
-    file_descriptor = open(filename, O_APPEND | O_CREAT, 0644);
-    if(file_descriptor == -1) {
-        if(errno == EINTR) {
-            if(exitRQ) {
+    file_descriptor = open(filename, O_WRONLY | O_APPEND | O_CREAT, 0644);
+
+    if (file_descriptor == -1)
+    {
+        if (errno == EINTR)
+        {
+            if (exitRQ)
+            {
                 return -1;
             }
+
             goto retry_open;
         }
+
         syslog(LOG_ERR, "open() Failure: %s", strerror(errno));
         return -1;
     }
 
     off_t size = lseek(file_descriptor, 0, SEEK_END);
-    if(size == -1) {
+
+    if (size == -1)
+    {
         syslog(LOG_ERR, "lseek() Failed: %s", strerror(errno));
         close(file_descriptor);
         return -1;
     }
 
-    if(size == 0) {
+    if (size == 0)
+    {
         *flag = 1;
     }
-    else {
+    else
+    {
         *flag = 0;
     }
 
