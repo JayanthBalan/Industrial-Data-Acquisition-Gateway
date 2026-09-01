@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#include <netdb.h>
 
 #define SYNC_BYTE 0xAA
 #define SELECTION_BYTE_GETALL 0xF6
@@ -26,43 +27,60 @@ typedef struct {
     int server_port;
 } receiver_args_t;
 
-static int connect_to_server(const char *ip, int port) {
-    int sockfd;
-    struct sockaddr_in6 server_addr;
+static int connect_to_server(const char *ip, int port)
+{
+    struct addrinfo hints;
+    struct addrinfo *result = NULL;
+    struct addrinfo *rp;
+    char port_string[16];
+    int sockfd = -1;
+    int status;
 
-    sockfd = socket(AF_INET6, SOCK_STREAM, 0);
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    snprintf(port_string, sizeof(port_string), "%d", port);
+
+    status = getaddrinfo(ip, port_string, &hints, &result);
+
+    if (status != 0) {
+        fprintf(stderr, "getaddrinfo() failed: %s\n", gai_strerror(status));
+        return -1;
+    }
+
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+
+        if (sockfd == -1) {
+            continue;
+        }
+
+        if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;
+        }
+
+        close(sockfd);
+        sockfd = -1;
+    }
+
+    freeaddrinfo(result);
 
     if (sockfd == -1) {
-        perror("socket");
-        return -1;
-    }
-
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin6_family = AF_INET6;
-    server_addr.sin6_port = htons((uint16_t)port);
-
-    if (inet_pton(AF_INET6, ip, &server_addr.sin6_addr) != 1) {
-        perror("inet_pton");
-        close(sockfd);
-        return -1;
-    }
-
-    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
         perror("connect");
-        close(sockfd);
-        return -1;
     }
 
     return sockfd;
 }
 
-static int send_all(int sockfd, const void *buffer, size_t length) {
+static int send_all(int sockfd, const void *buffer, size_t length)
+{
     size_t total_sent = 0;
 
     while (total_sent < length) {
         ssize_t bytes_sent;
 
-        bytes_sent = send(sockfd, (const uint8_t *)buffer + total_sent, length - total_sent, 0);
+        bytes_sent = send(sockfd, (const uint8_t *)buffer + total_sent, length - total_sent, MSG_NOSIGNAL);
 
         if (bytes_sent == -1) {
             if (errno == EINTR) {
@@ -83,7 +101,8 @@ static int send_all(int sockfd, const void *buffer, size_t length) {
     return 0;
 }
 
-static int send_get_id(int sockfd, uint16_t id) {
+static int send_get_id(int sockfd, uint16_t id)
+{
     uint8_t command[4];
 
     command[0] = SYNC_BYTE;
@@ -93,16 +112,15 @@ static int send_get_id(int sockfd, uint16_t id) {
     return send_all(sockfd, command, sizeof(command));
 }
 
-static ssize_t receive_response(int sockfd, char *buffer, size_t buffer_size) {
+static ssize_t receive_response(int sockfd, char *buffer, size_t buffer_size)
+{
     ssize_t bytes_received;
 
-    bytes_received = recv(sockfd, buffer, buffer_size - 1, 0);
+    do {
+        bytes_received = recv(sockfd, buffer, buffer_size - 1, 0);
+    } while (bytes_received == -1 && errno == EINTR);
 
     if (bytes_received == -1) {
-        if (errno == EINTR) {
-            return 0;
-        }
-
         perror("recv");
         return -1;
     }
@@ -114,7 +132,8 @@ static ssize_t receive_response(int sockfd, char *buffer, size_t buffer_size) {
     return bytes_received;
 }
 
-static int parse_latency_response(const char *response, int32_t *sent_seconds, int32_t *sent_microseconds) {
+static int parse_latency_response(const char *response, int32_t *sent_seconds, int32_t *sent_microseconds)
+{
     const char *power;
     const char *current;
 
@@ -136,7 +155,8 @@ static int parse_latency_response(const char *response, int32_t *sent_seconds, i
     return 0;
 }
 
-static void log_latency(FILE *file, int32_t sent_seconds, int32_t sent_microseconds) {
+static void log_latency(FILE *file, int32_t sent_seconds, int32_t sent_microseconds)
+{
     struct timespec now;
     uint32_t current_seconds;
     uint32_t current_microseconds;
@@ -158,21 +178,14 @@ static void log_latency(FILE *file, int32_t sent_seconds, int32_t sent_microseco
         latency_us += 86400LL * 1000000LL;
     }
 
-    fprintf(file, "%d,%d,%u,%u,%lld\n",
-            sent_seconds,
-            sent_microseconds,
-            current_seconds,
-            current_microseconds,
-            (long long)latency_us);
-
+    fprintf(file, "%d,%d,%u,%u,%lld\n", sent_seconds, sent_microseconds, current_seconds, current_microseconds, (long long)latency_us);
     fflush(file);
 
-    printf("Latency: %lld us (%.3f ms)\n",
-           (long long)latency_us,
-           (double)latency_us / 1000.0);
+    printf("Latency: %lld us (%.3f ms)\n", (long long)latency_us, (double)latency_us / 1000.0);
 }
 
-static void *latency_receiver_thread(void *arg) {
+static void *latency_receiver_thread(void *arg)
+{
     receiver_args_t *args = arg;
     int sockfd;
     FILE *latency_file;
@@ -228,7 +241,8 @@ static void *latency_receiver_thread(void *arg) {
     return NULL;
 }
 
-static int send_user_command(int sockfd, const char *command) {
+static int send_user_command(int sockfd, const char *command)
+{
     uint8_t packet[4];
     uint16_t id;
     uint8_t type;
@@ -236,21 +250,18 @@ static int send_user_command(int sockfd, const char *command) {
     if (strcmp(command, "GET ALL\n") == 0) {
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETALL;
-
         return send_all(sockfd, packet, 2);
     }
 
     if (strcmp(command, "GET ONLINE\n") == 0) {
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETONLINE;
-
         return send_all(sockfd, packet, 2);
     }
 
     if (strcmp(command, "GET OFFLINE\n") == 0) {
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETOFFLINE;
-
         return send_all(sockfd, packet, 2);
     }
 
@@ -288,7 +299,8 @@ static int send_user_command(int sockfd, const char *command) {
     return send_all(sockfd, packet, 3);
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
     const char *server_ip;
     int server_port;
     receiver_args_t args;

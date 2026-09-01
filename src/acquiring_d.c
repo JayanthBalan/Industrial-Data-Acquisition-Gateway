@@ -210,7 +210,7 @@ static int socket_init(int *server_fd) {
     *server_fd = -1;
 
     // Server Address Configuration
-    serverHints.ai_family = AF_INET6;
+    serverHints.ai_family = AF_INET;
     serverHints.ai_socktype = SOCK_STREAM;
     serverHints.ai_flags = AI_PASSIVE;
     serverHints.ai_protocol = 0;

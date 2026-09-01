@@ -153,6 +153,7 @@ static void *normal_client_thread(void *arg) {
                 close(sockfd);
                 return NULL;
             }
+            printf("Normal client %d sent: Type=%02X ID=%u Length=%u\n", args->thread_id, type, id, data_length);
 
             usleep(100000);
         }
