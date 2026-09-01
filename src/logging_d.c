@@ -38,7 +38,6 @@ int main() {
         ssize_t len;
         if((len = receiveFrame(&data_frame)) == -1) {
             mq_close(rx_process_mq);
-            unlink(RX_MQ_NAME);
             closelog();
             return -1;
         }
@@ -51,14 +50,12 @@ int main() {
         int fd;
         if((fd = openLogFile(&data_frame, &newfile_flag)) == -1) {
             mq_close(rx_process_mq);
-            unlink(RX_MQ_NAME);
             closelog();
             return -1;
         }
 
         if(writeFrameData(data_frame.data, data_frame.type, data_frame.timestamp, newfile_flag, fd) == -1) {
             mq_close(rx_process_mq);
-            unlink(RX_MQ_NAME);
             close(fd);
             closelog();
             return -1;
@@ -68,7 +65,6 @@ int main() {
     }
 
     mq_close(rx_process_mq);
-    unlink(RX_MQ_NAME);
     closelog();
     return 0;
 }
@@ -136,6 +132,16 @@ retry_open:
 static int ipc_init(void) {
     rx_process_mq = mq_open(RX_MQ_NAME, O_RDONLY);
     if(rx_process_mq == ((mqd_t) - 1)) {
+        return -1;
+    }
+    struct mq_attr attr;
+    if (mq_getattr(rx_process_mq, &attr) == -1) {
+        syslog(LOG_ERR, "mq_getattr failed: %s", strerror(errno));
+        return -1;
+    }
+    if (attr.mq_msgsize < sizeof(Sensor_t)) {
+        syslog(LOG_ERR, "Acquisition MQ message size too small: %ld", attr.mq_msgsize);
+        mq_close(rx_process_mq);
         return -1;
     }
 

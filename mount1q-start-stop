@@ -1,0 +1,12 @@
+#!/bin/sh
+
+case "$1" in
+    start)
+        mkdir -p /dev/mqueue
+        mountpoint -q /dev/mqueue || mount -t mqueue none /dev/mqueue
+        ;;
+    stop)
+        ;;
+esac
+
+exit 0

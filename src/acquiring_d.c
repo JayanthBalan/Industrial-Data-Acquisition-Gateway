@@ -194,8 +194,10 @@ static inline void forwardPacket(uint8_t *packet, size_t len) {
 }
 
 static int ipc_init(void) {
-    transfer_mq = mq_open(MESSAGE_QUEUE_NAME, O_WRONLY | O_CREAT, 0644, NULL);
+    struct mq_attr attr = {.mq_flags = 0, .mq_maxmsg = 10, .mq_msgsize = PACKET_SIZE, .mq_curmsgs = 0};
+    transfer_mq = mq_open(MESSAGE_QUEUE_NAME, O_WRONLY | O_CREAT, 0644, &attr);
     if(transfer_mq == ((mqd_t) - 1)) {
+        unlink(MESSAGE_QUEUE_NAME);
         return -1;
     }
 

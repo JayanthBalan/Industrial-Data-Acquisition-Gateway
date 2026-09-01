@@ -48,7 +48,6 @@ int main() {
             mq_close(rx_acquire_mq);
             mq_close(tx_log_mq);
             mq_close(tx_telemetry_mq);
-            unlink(RX_ACQUIRE_MQ_NAME);
             closelog();
             return -1;
         }
@@ -58,7 +57,6 @@ int main() {
             mq_close(rx_acquire_mq);
             mq_close(tx_log_mq);
             mq_close(tx_telemetry_mq);
-            unlink(RX_ACQUIRE_MQ_NAME);
             closelog();
             return -1;
         }
@@ -67,7 +65,6 @@ int main() {
             mq_close(rx_acquire_mq);
             mq_close(tx_log_mq);
             mq_close(tx_telemetry_mq);
-            unlink(RX_ACQUIRE_MQ_NAME);
             closelog();
             return -1;
         }
@@ -76,7 +73,6 @@ int main() {
     mq_close(rx_acquire_mq);
     mq_close(tx_log_mq);
     mq_close(tx_telemetry_mq);
-    unlink(RX_ACQUIRE_MQ_NAME);
     closelog();
     return 0;
 }
@@ -189,17 +185,31 @@ static int ipc_init(void) {
     if(rx_acquire_mq == ((mqd_t) - 1)) {
         return -1;
     }
-    tx_log_mq = mq_open(TX_LOG_MQ_NAME, O_WRONLY | O_CREAT, 0644, NULL);
-    if(tx_log_mq == ((mqd_t) - 1)) {
-        mq_close(rx_acquire_mq);
-        mq_unlink(RX_ACQUIRE_MQ_NAME);
+    struct mq_attr attr;
+    if (mq_getattr(rx_acquire_mq, &attr) == -1) {
+        syslog(LOG_ERR, "mq_getattr failed: %s", strerror(errno));
         return -1;
     }
-    tx_telemetry_mq = mq_open(TX_TELEMETRY_MQ_NAME, O_WRONLY | O_CREAT, 0644, NULL);
+    if (attr.mq_msgsize < PACKET_SIZE) {
+        syslog(LOG_ERR, "Acquisition MQ message size too small: %ld", attr.mq_msgsize);
+        mq_close(rx_acquire_mq);
+        return -1;
+    }
+
+    struct mq_attr attr1 = {.mq_flags = 0, .mq_maxmsg = 10, .mq_msgsize = sizeof(Sensor_t), .mq_curmsgs = 0};
+    tx_log_mq = mq_open(TX_LOG_MQ_NAME, O_WRONLY | O_CREAT, 0644, &attr1);
+    if(tx_log_mq == ((mqd_t) - 1)) {
+        mq_close(rx_acquire_mq);
+        mq_unlink(TX_LOG_MQ_NAME);
+        return -1;
+    }
+
+    struct mq_attr attr2 = {.mq_flags = 0, .mq_maxmsg = 10, .mq_msgsize = sizeof(Sensor_t), .mq_curmsgs = 0};
+    tx_telemetry_mq = mq_open(TX_TELEMETRY_MQ_NAME, O_WRONLY | O_CREAT, 0644, &attr2);
     if(tx_telemetry_mq == ((mqd_t) - 1)) {
         mq_close(rx_acquire_mq);
         mq_close(tx_log_mq);
-        mq_unlink(RX_ACQUIRE_MQ_NAME);
+        mq_unlink(TX_LOG_MQ_NAME);
         return -1;
     }
 

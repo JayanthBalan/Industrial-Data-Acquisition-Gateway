@@ -70,7 +70,6 @@ int main() {
     if(sensor_registry == NULL) {
         syslog(LOG_ERR, "malloc() Failed");
         mq_close(rx_process_mq);
-        unlink(RX_MQ_NAME);
         pthread_mutex_destroy(&registry_mutex);
         closelog();
         return -1;
@@ -78,13 +77,11 @@ int main() {
 
     if(sensorWatchdog_init() == -1) {
         mq_close(rx_process_mq);
-        unlink(RX_MQ_NAME);
         closelog();
         return -1;
     }
     if(userInterface_init() == -1) {
         mq_close(rx_process_mq);
-        unlink(RX_MQ_NAME);
         closelog();
         return -1;
     }
@@ -106,7 +103,6 @@ int main() {
                 pthread_mutex_unlock(&registry_mutex);
                 syslog(LOG_ERR, "realloc() Failed");
                 mq_close(rx_process_mq);
-                unlink(RX_MQ_NAME);
                 closelog();
                 return -1;
             }
@@ -119,7 +115,6 @@ int main() {
         ssize_t len;
         if((len = receiveFrame(&data_frame)) == -1) {
             mq_close(rx_process_mq);
-            unlink(RX_MQ_NAME);
             closelog();
             return -1;
         }
@@ -136,7 +131,6 @@ int main() {
             pthread_mutex_unlock(&registry_mutex);
             syslog(LOG_ERR, "Sensor Unsupported");
             mq_close(rx_process_mq);
-            unlink(RX_MQ_NAME);
             closelog();
             return -1;
         }
@@ -145,7 +139,6 @@ int main() {
                 pthread_mutex_unlock(&registry_mutex);
                 syslog(LOG_ERR, "Max Sensor Registry Size Exceeded");
                 mq_close(rx_process_mq);
-                unlink(RX_MQ_NAME);
                 closelog();
                 return -1;
             }
@@ -156,7 +149,6 @@ int main() {
             pthread_mutex_unlock(&registry_mutex);
             syslog(LOG_ERR, "Sensor Registry Update Failure");
             mq_close(rx_process_mq);
-            unlink(RX_MQ_NAME);
             closelog();
             return -1;
         }
@@ -164,7 +156,6 @@ int main() {
     }
 
     mq_close(rx_process_mq);
-    unlink(RX_MQ_NAME);
     closelog();
     return 0;
 }
@@ -660,6 +651,16 @@ mq_receive_retry:
 static int ipc_init(void) {
     rx_process_mq = mq_open(RX_MQ_NAME, O_RDONLY);
     if(rx_process_mq == ((mqd_t) -1)) {
+        return -1;
+    }
+    struct mq_attr attr;
+    if (mq_getattr(rx_process_mq, &attr) == -1) {
+        syslog(LOG_ERR, "mq_getattr failed: %s", strerror(errno));
+        return -1;
+    }
+    if (attr.mq_msgsize < sizeof(Sensor_t)) {
+        syslog(LOG_ERR, "Acquisition MQ message size too small: %ld", attr.mq_msgsize);
+        mq_close(rx_process_mq);
         return -1;
     }
 
