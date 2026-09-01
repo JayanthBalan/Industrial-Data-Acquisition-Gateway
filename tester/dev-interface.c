@@ -25,6 +25,7 @@
 typedef struct {
     const char *server_ip;
     int server_port;
+    pthread_mutex_t *request_mutex;
 } receiver_args_t;
 
 static int connect_to_server(const char *ip, int port)
@@ -228,31 +229,24 @@ static void *latency_receiver_thread(void *arg)
     fflush(latency_file);
 
     while(1) {
-        int sockfd = connect_to_server(args->server_ip, args->server_port);
+        int sockfd;
 
-        if(sockfd == -1) {
-            usleep(100000);
-            continue;
-        }
+        pthread_mutex_lock(args->request_mutex);
 
-        if(send_get_id(sockfd, LATENCY_SENSOR_ID) == -1) {
+        sockfd = connect_to_server(args->server_ip, args->server_port);
+
+        if(sockfd != -1) {
+            if(send_get_id(sockfd, LATENCY_SENSOR_ID) == 0) {
+                receive_until_end(sockfd, 0, latency_file);
+            }
+
             close(sockfd);
-            usleep(100000);
-            continue;
         }
 
-        if(receive_until_end(sockfd, 0, latency_file) == -1) {
-            close(sockfd);
-            usleep(100000);
-            continue;
-        }
+        pthread_mutex_unlock(args->request_mutex);
 
-        close(sockfd);
-
-        usleep(10000);
+        usleep(1000000);
     }
-
-    fclose(latency_file);
 
     return NULL;
 }
@@ -330,6 +324,7 @@ int main(int argc, char *argv[])
     int server_port;
     receiver_args_t args;
     pthread_t latency_thread;
+    pthread_mutex_t request_mutex;
     char command[256];
 
     if(argc != 3) {
@@ -340,11 +335,18 @@ int main(int argc, char *argv[])
     server_ip = argv[1];
     server_port = atoi(argv[2]);
 
+    if(pthread_mutex_init(&request_mutex, NULL) != 0) {
+        perror("pthread_mutex_init");
+        return EXIT_FAILURE;
+    }
+
     args.server_ip = server_ip;
     args.server_port = server_port;
+    args.request_mutex = &request_mutex;
 
     if(pthread_create(&latency_thread, NULL, latency_receiver_thread, &args) != 0) {
         perror("pthread_create");
+        pthread_mutex_destroy(&request_mutex);
         return EXIT_FAILURE;
     }
 
@@ -368,14 +370,18 @@ int main(int argc, char *argv[])
             break;
         }
 
+        pthread_mutex_lock(&request_mutex);
+
         sockfd = connect_to_server(server_ip, server_port);
 
         if(sockfd == -1) {
+            pthread_mutex_unlock(&request_mutex);
             continue;
         }
 
         if(send_user_command(sockfd, command) == -1) {
             close(sockfd);
+            pthread_mutex_unlock(&request_mutex);
             continue;
         }
 
@@ -384,10 +390,14 @@ int main(int argc, char *argv[])
         }
 
         close(sockfd);
+
+        pthread_mutex_unlock(&request_mutex);
     }
 
     pthread_cancel(latency_thread);
     pthread_join(latency_thread, NULL);
+
+    pthread_mutex_destroy(&request_mutex);
 
     return EXIT_SUCCESS;
 }
