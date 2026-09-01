@@ -165,7 +165,7 @@ static int receivePacket(uint8_t *buffer) {
     ssize_t bytes_read;
 
 mq_receive_retry:
-    bytes_read = mq_receive(rx_acquire_mq, buffer, packet_size, &priority);
+    bytes_read = mq_receive(rx_acquire_mq, (char *)buffer, packet_size, &priority);
     if(bytes_read == -1) {
         if(errno == EINTR) {
             if(exitRQ) {

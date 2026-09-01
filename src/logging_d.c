@@ -79,7 +79,7 @@ static ssize_t receiveFrame(Sensor_t *frame) {
     ssize_t bytes_read;
 
 mq_receive_retry:
-    bytes_read = mq_receive(rx_process_mq, frame, frame_size, &priority);
+    bytes_read = mq_receive(rx_process_mq, (char *)frame, frame_size, &priority);
     if(bytes_read == -1) {
         if(errno == EINTR) {
             if(exitRQ) {

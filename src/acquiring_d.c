@@ -188,7 +188,7 @@ static ssize_t socket_recv(int fd, void *buffer, size_t len) {
 }
 
 static inline void forwardPacket(uint8_t *packet, size_t len) {
-    if(mq_send(transfer_mq, packet, len, MESSAGE_QUEUE_PRIORITY) == -1) {
+    if(mq_send(transfer_mq, (const char *)packet, len, MESSAGE_QUEUE_PRIORITY) == -1) {
         syslog(LOG_ERR, "mq_send() Failed: %s", strerror(errno));
     }
 }
