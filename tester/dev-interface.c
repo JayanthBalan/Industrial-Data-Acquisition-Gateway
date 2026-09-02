@@ -1,6 +1,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <netdb.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -9,7 +10,6 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
-#include <netdb.h>
 
 #define SYNC_BYTE 0xAA
 #define SELECTION_BYTE_GETALL 0xF6
@@ -22,97 +22,12 @@
 #define LATENCY_SENSOR_ID 65000
 #define TELEMETRY_BUFFER_SIZE 4096
 #define LATENCY_LOG_FILE "latency-log.csv"
-#define SENSOR_NAME_SIZE 13
-
-typedef struct timespec sensor_timespec_t;
-
-typedef enum SensorType {
-    SENSOR_TYPE_TEMPPRESS = 0x1B,
-    SENSOR_TYPE_POWCURRVOLT = 0x2B,
-    SENSOR_TYPE_TORQUE = 0x4B,
-    SENSOR_TYPE_PROXIMITY = 0x8B,
-    SENSOR_TYPE_UNSUPPORTED
-} SensorType_e;
-
-typedef enum SensorState {
-    SENSOR_FRAME_DEFAULT,
-    SENSOR_OFFLINE,
-    SENSOR_ONLINE
-} SensorState_e;
-
-typedef enum SensorFrameType {
-    SENSOR_HEARTBEAT,
-    SENSOR_DATA
-} SensorFrameType_e;
-
-typedef struct TempPress {
-    int32_t temperature;
-    uint32_t pressure;
-} TempPress_t;
-
-typedef struct PowCurrVolt {
-    int32_t power;
-    int32_t current;
-    int32_t voltage;
-} PowCurrVolt_t;
-
-typedef struct Torque {
-    int32_t torque;
-} Torque_t;
-
-typedef struct Proximity {
-    uint32_t proximity;
-} Proximity_t;
-
-typedef union SensorData {
-    PowCurrVolt_t powcurrvolt;
-    TempPress_t temppress;
-    Torque_t tor;
-    Proximity_t prox;
-} SensorData_u;
-
-typedef struct Sensor {
-    SensorData_u data;
-    sensor_timespec_t timestamp;
-    sensor_timespec_t last_seen_time;
-    uint16_t id;
-    char name[SENSOR_NAME_SIZE];
-    SensorType_e type;
-    SensorState_e state;
-    SensorFrameType_e frame_type;
-} Sensor_t;
 
 typedef struct {
     const char *server_ip;
     int server_port;
     pthread_mutex_t *request_mutex;
 } receiver_args_t;
-
-static int receive_all(int sockfd, void *buffer, size_t length)
-{
-    size_t total_received = 0;
-
-    while(total_received < length) {
-        ssize_t bytes_received = recv(sockfd, (uint8_t *)buffer + total_received, length - total_received, 0);
-
-        if(bytes_received == 0) {
-            return -1;
-        }
-
-        if(bytes_received < 0) {
-            if(errno == EINTR) {
-                continue;
-            }
-
-            perror("recv");
-            return -1;
-        }
-
-        total_received += (size_t)bytes_received;
-    }
-
-    return 0;
-}
 
 static int connect_to_server(const char *ip, int port)
 {
@@ -124,6 +39,7 @@ static int connect_to_server(const char *ip, int port)
     int status;
 
     memset(&hints, 0, sizeof(hints));
+
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
@@ -165,7 +81,9 @@ static int send_all(int sockfd, const void *buffer, size_t length)
     size_t total_sent = 0;
 
     while(total_sent < length) {
-        ssize_t bytes_sent = send(sockfd, (const uint8_t *)buffer + total_sent, length - total_sent, MSG_NOSIGNAL);
+        ssize_t bytes_sent;
+
+        bytes_sent = send(sockfd, (const uint8_t *)buffer + total_sent, length - total_sent, MSG_NOSIGNAL);
 
         if(bytes_sent < 0) {
             if(errno == EINTR) {
@@ -239,7 +157,7 @@ static void log_latency(FILE *file, int64_t sent_seconds, int64_t sent_nanosecon
     previous_seconds = sent_seconds;
     previous_nanoseconds = sent_nanoseconds;
 
-    if(clock_gettime(CLOCK_MONOTONIC, &now) == -1) {
+    if(clock_gettime(CLOCK_REALTIME, &now) == -1) {
         return;
     }
 
@@ -275,6 +193,7 @@ static void print_average_latency(void)
         }
 
         errno = 0;
+
         value = strtoll(line, &endptr, 10);
 
         if(errno != 0 || endptr == line) {
@@ -336,7 +255,9 @@ static int receive_until_end(int sockfd, int print_response, FILE *latency_file)
     size_t line_length = 0;
 
     while(1) {
-        ssize_t bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
+        ssize_t bytes_received;
+
+        bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
 
         if(bytes_received == 0) {
             return -1;
@@ -356,57 +277,13 @@ static int receive_until_end(int sockfd, int print_response, FILE *latency_file)
                 int result;
 
                 line[line_length] = '\0';
+
                 result = process_line(line, print_response, latency_file);
+
                 line_length = 0;
 
                 if(result == 1) {
                     return 0;
-                }
-            }
-            else {
-                if(line_length >= sizeof(line) - 1) {
-                    return -1;
-                }
-
-                line[line_length++] = buffer[i];
-            }
-        }
-    }
-}
-
-static int receive_throughput(int sockfd)
-{
-    char buffer[TELEMETRY_BUFFER_SIZE];
-    char line[TELEMETRY_BUFFER_SIZE];
-    size_t line_length = 0;
-
-    while(1) {
-        ssize_t bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
-
-        if(bytes_received == 0) {
-            return -1;
-        }
-
-        if(bytes_received < 0) {
-            if(errno == EINTR) {
-                continue;
-            }
-
-            perror("recv");
-            return -1;
-        }
-
-        for(ssize_t i = 0; i < bytes_received; i++) {
-            if(buffer[i] == '\n') {
-                line[line_length] = '\0';
-                line_length = 0;
-
-                if(strcmp(line, "END") == 0) {
-                    return 0;
-                }
-
-                if(line[0] != '\0') {
-                    printf("%s\n", line);
                 }
             }
             else {
@@ -467,24 +344,29 @@ static int send_user_command(int sockfd, const char *command)
     if(strcmp(command, "GET ALL\n") == 0) {
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETALL;
+
         return send_all(sockfd, packet, 2);
     }
 
     if(strcmp(command, "GET ONLINE\n") == 0) {
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETONLINE;
+
         return send_all(sockfd, packet, 2);
     }
 
     if(strcmp(command, "GET OFFLINE\n") == 0) {
         packet[0] = SYNC_BYTE;
         packet[1] = SELECTION_BYTE_GETOFFLINE;
+
         return send_all(sockfd, packet, 2);
     }
 
     if(strncmp(command, "GET ID ", 7) == 0) {
         char *endptr;
-        unsigned long value = strtoul(command + 7, &endptr, 16);
+        unsigned long value;
+
+        value = strtoul(command + 7, &endptr, 16);
 
         if(endptr == command + 7 || value > UINT16_MAX) {
             fprintf(stderr, "Invalid hexadecimal sensor ID\n");
@@ -600,7 +482,7 @@ int main(int argc, char *argv[])
                 continue;
             }
 
-            if(receive_throughput(sockfd) == -1) {
+            if(receive_until_end(sockfd, 1, NULL) == -1) {
                 fprintf(stderr, "Failed to receive throughput data\n");
             }
 
