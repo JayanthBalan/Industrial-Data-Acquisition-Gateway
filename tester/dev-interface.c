@@ -21,12 +21,23 @@
 #define LATENCY_SENSOR_ID 65000
 #define TELEMETRY_BUFFER_SIZE 4096
 #define LATENCY_LOG_FILE "latency-log.csv"
+#define LATENCY_WINDOW_SECONDS 10
+#define MAX_LATENCY_SAMPLES 4096
+
+typedef struct {
+    int64_t latency_us;
+    struct timespec received_time;
+} latency_sample_t;
 
 typedef struct {
     const char *server_ip;
     int server_port;
     pthread_mutex_t *request_mutex;
 } receiver_args_t;
+
+static latency_sample_t latency_samples[MAX_LATENCY_SAMPLES];
+static size_t latency_sample_count = 0;
+static pthread_mutex_t latency_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int connect_to_server(const char *ip, int port)
 {
@@ -127,6 +138,36 @@ static int parse_latency_response(const char *response, int64_t *sent_seconds, i
     return 0;
 }
 
+static void remove_old_latency_samples(struct timespec now)
+{
+    size_t write_index = 0;
+
+    for(size_t i = 0; i < latency_sample_count; i++) {
+        int64_t elapsed_seconds = (int64_t)now.tv_sec - (int64_t)latency_samples[i].received_time.tv_sec;
+
+        if(elapsed_seconds < LATENCY_WINDOW_SECONDS) {
+            latency_samples[write_index++] = latency_samples[i];
+        }
+    }
+
+    latency_sample_count = write_index;
+}
+
+static void store_latency_sample(int64_t latency_us, struct timespec received_time)
+{
+    pthread_mutex_lock(&latency_mutex);
+
+    remove_old_latency_samples(received_time);
+
+    if(latency_sample_count < MAX_LATENCY_SAMPLES) {
+        latency_samples[latency_sample_count].latency_us = latency_us;
+        latency_samples[latency_sample_count].received_time = received_time;
+        latency_sample_count++;
+    }
+
+    pthread_mutex_unlock(&latency_mutex);
+}
+
 static void log_latency(FILE *file, int64_t sent_seconds, int64_t sent_nanoseconds)
 {
     static int64_t previous_seconds = -1;
@@ -153,6 +194,37 @@ static void log_latency(FILE *file, int64_t sent_seconds, int64_t sent_nanosecon
 
     fprintf(file, "%lld\n", (long long)latency_us);
     fflush(file);
+
+    store_latency_sample(latency_us, now);
+}
+
+static void print_average_latency(void)
+{
+    struct timespec now;
+    int64_t latency_sum = 0;
+
+    if(clock_gettime(CLOCK_REALTIME, &now) == -1) {
+        perror("clock_gettime");
+        return;
+    }
+
+    pthread_mutex_lock(&latency_mutex);
+
+    remove_old_latency_samples(now);
+
+    if(latency_sample_count == 0) {
+        printf("No latency samples received in the last 10 seconds\n");
+        pthread_mutex_unlock(&latency_mutex);
+        return;
+    }
+
+    for(size_t i = 0; i < latency_sample_count; i++) {
+        latency_sum += latency_samples[i].latency_us;
+    }
+
+    printf("Average latency over the last 10 seconds: %lld microseconds\n", (long long)(latency_sum / (int64_t)latency_sample_count));
+
+    pthread_mutex_unlock(&latency_mutex);
 }
 
 static int process_line(const char *line, int print_response, FILE *latency_file)
@@ -368,6 +440,8 @@ int main(int argc, char *argv[])
     printf("GET ONLINE\n");
     printf("GET OFFLINE\n");
     printf("GET ID <Sensor_ID>\n");
+    printf("GET LATENCY\n");
+    printf("GET THROUGHPUT\n");
 
     while(1) {
         int sockfd;
@@ -377,6 +451,16 @@ int main(int argc, char *argv[])
 
         if(fgets(command, sizeof(command), stdin) == NULL) {
             break;
+        }
+
+        if(strcmp(command, "GET LATENCY\n") == 0) {
+            print_average_latency();
+            continue;
+        }
+
+        if(strcmp(command, "GET THROUGHPUT\n") == 0) {
+            printf("GET THROUGHPUT requires the matching telemetryd implementation\n");
+            continue;
         }
 
         pthread_mutex_lock(&request_mutex);
@@ -407,6 +491,7 @@ int main(int argc, char *argv[])
     pthread_join(latency_thread, NULL);
 
     pthread_mutex_destroy(&request_mutex);
+    pthread_mutex_destroy(&latency_mutex);
 
     return EXIT_SUCCESS;
 }

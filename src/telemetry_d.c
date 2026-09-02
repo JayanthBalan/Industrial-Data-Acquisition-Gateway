@@ -21,6 +21,7 @@
 #define SELECTION_BYTE_GETID 0xFB
 #define SELECTION_BYTE_GETONLINE 0xFD
 #define SELECTION_BYTE_GETOFFLINE 0xFE
+#define SELECTION_BYTE_GETTHROUGHPUT 0xFC
 #define ID_BYTE_SIZE 2
 #define TYPE_BYTE_SIZE 1
 #define TRANSMIT_BUFFER_SIZE 500
@@ -50,6 +51,7 @@ static int giveSensorAll_Online(int);
 static int giveSensorAll_Offline(int);
 static int giveSensorAll(int);
 static int sendResponseEnd(int);
+static int giveSensorThroughput(int);
 
 int main(void) {
     openlog(__FILE__, LOG_PID | LOG_CONS, LOG_DAEMON);
@@ -407,6 +409,12 @@ static void *userHandler(void *arg) {
                 break;
             }
         }
+        else if(selection_byte == SELECTION_BYTE_GETTHROUGHPUT) {
+            if(giveSensorThroughput(client_fd) == -1) {
+                syslog(LOG_ERR, "Throughput send() Failed");
+                break;
+            }
+        }
         else {
             syslog(LOG_ERR, "Unsupported View Option");
             break;
@@ -415,6 +423,92 @@ static void *userHandler(void *arg) {
 
     close(client_fd);
     return NULL;
+}
+
+static int giveSensorThroughput(int fd) {
+    struct timespec start_time;
+    struct timespec current_time;
+    Sensor_t end_sensor = {0};
+
+    if(clock_gettime(CLOCK_MONOTONIC, &start_time) == -1) {
+        return -1;
+    }
+
+    while(1) {
+        pthread_mutex_lock(&registry_mutex);
+
+        size_t count = sensor_count;
+        Sensor_t *snapshot = NULL;
+
+        if(count > 0) {
+            snapshot = malloc(sizeof(Sensor_t) * count);
+
+            if(snapshot == NULL) {
+                pthread_mutex_unlock(&registry_mutex);
+                return -1;
+            }
+
+            memcpy(snapshot, sensor_registry, sizeof(Sensor_t) * count);
+        }
+
+        pthread_mutex_unlock(&registry_mutex);
+
+        for(size_t idx = 0; idx < count; idx++) {
+            size_t total_sent = 0;
+
+            while(total_sent < sizeof(Sensor_t)) {
+                ssize_t bytes_sent = send(fd, (uint8_t *)&snapshot[idx] + total_sent, sizeof(Sensor_t) - total_sent, MSG_NOSIGNAL);
+
+                if(bytes_sent == 0) {
+                    free(snapshot);
+                    return -1;
+                }
+
+                if(bytes_sent < 0) {
+                    if(errno == EINTR) {
+                        continue;
+                    }
+
+                    free(snapshot);
+                    return -1;
+                }
+
+                total_sent += (size_t)bytes_sent;
+            }
+        }
+
+        free(snapshot);
+
+        if(clock_gettime(CLOCK_MONOTONIC, &current_time) == -1) {
+            return -1;
+        }
+
+        if(elapsedSeconds(start_time, current_time) >= 10.0) {
+            break;
+        }
+    }
+
+    size_t total_sent = 0;
+
+    while(total_sent < sizeof(Sensor_t)) {
+        ssize_t bytes_sent = send(fd, (uint8_t *)&end_sensor + total_sent, sizeof(Sensor_t) - total_sent, MSG_NOSIGNAL);
+
+        if(bytes_sent == 0) {
+            return -1;
+        }
+
+        if(bytes_sent < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+
+            return -1;
+        }
+
+        total_sent += (size_t)bytes_sent;
+    }
+
+    return 0;
 }
 
 static int giveSensorAll_Offline(int fd) {
