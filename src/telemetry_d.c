@@ -28,10 +28,12 @@
 
 static mqd_t rx_process_mq;
 pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t throughput_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static Sensor_t *sensor_registry = NULL;
 static size_t sensor_count = 0UL;
 static size_t sensor_reallocation = 1UL;
+static uint64_t throughput_frame_count = 0ULL;
 static const size_t sensor_allocation_count = 16UL;
 static const double sensor_activity_time = SENSOR_INACTIVE_SECS_MAX;
 
@@ -78,6 +80,7 @@ int main(void) {
         syslog(LOG_ERR, "malloc() Failed");
         mq_close(rx_process_mq);
         pthread_mutex_destroy(&registry_mutex);
+        pthread_mutex_destroy(&throughput_mutex);
         closelog();
         return -1;
     }
@@ -143,6 +146,10 @@ int main(void) {
             continue;
         }
 
+        pthread_mutex_lock(&throughput_mutex);
+        throughput_frame_count++;
+        pthread_mutex_unlock(&throughput_mutex);
+
         int8_t new_sensor_flag = 0;
         int sensor_index;
 
@@ -187,6 +194,7 @@ int main(void) {
     free(sensor_registry);
     mq_close(rx_process_mq);
     pthread_mutex_destroy(&registry_mutex);
+    pthread_mutex_destroy(&throughput_mutex);
     closelog();
     return 0;
 }
@@ -366,8 +374,7 @@ static void *userHandler(void *arg) {
             Sensor_t target_sensor = getSensor_ID(call_id, sensor_registry, sensor_count);
             pthread_mutex_unlock(&registry_mutex);
 
-            if(giveSensor(target_sensor, client_fd) == -1 ||
-                sendResponseEnd(client_fd) == -1) {
+            if(giveSensor(target_sensor, client_fd) == -1 || sendResponseEnd(client_fd) == -1) {
                 syslog(LOG_ERR, "send() Failed");
                 break;
             }
@@ -427,71 +434,53 @@ static void *userHandler(void *arg) {
 
 static int giveSensorThroughput(int fd) {
     struct timespec start_time;
-    struct timespec current_time;
-    Sensor_t end_sensor = {0};
+    struct timespec end_time;
+    uint64_t start_count;
+    uint64_t end_count;
 
     if(clock_gettime(CLOCK_MONOTONIC, &start_time) == -1) {
         return -1;
     }
 
-    while(1) {
-        pthread_mutex_lock(&registry_mutex);
+    pthread_mutex_lock(&throughput_mutex);
+    start_count = throughput_frame_count;
+    pthread_mutex_unlock(&throughput_mutex);
 
-        size_t count = sensor_count;
-        Sensor_t *snapshot = NULL;
+    sleep(10);
 
-        if(count > 0) {
-            snapshot = malloc(sizeof(Sensor_t) * count);
-
-            if(snapshot == NULL) {
-                pthread_mutex_unlock(&registry_mutex);
-                return -1;
-            }
-
-            memcpy(snapshot, sensor_registry, sizeof(Sensor_t) * count);
-        }
-
-        pthread_mutex_unlock(&registry_mutex);
-
-        for(size_t idx = 0; idx < count; idx++) {
-            size_t total_sent = 0;
-
-            while(total_sent < sizeof(Sensor_t)) {
-                ssize_t bytes_sent = send(fd, (uint8_t *)&snapshot[idx] + total_sent, sizeof(Sensor_t) - total_sent, MSG_NOSIGNAL);
-
-                if(bytes_sent == 0) {
-                    free(snapshot);
-                    return -1;
-                }
-
-                if(bytes_sent < 0) {
-                    if(errno == EINTR) {
-                        continue;
-                    }
-
-                    free(snapshot);
-                    return -1;
-                }
-
-                total_sent += (size_t)bytes_sent;
-            }
-        }
-
-        free(snapshot);
-
-        if(clock_gettime(CLOCK_MONOTONIC, &current_time) == -1) {
-            return -1;
-        }
-
-        if(elapsedSeconds(start_time, current_time) >= 10.0) {
-            break;
-        }
+    if(clock_gettime(CLOCK_MONOTONIC, &end_time) == -1) {
+        return -1;
     }
 
-    size_t total_sent = 0;
+    pthread_mutex_lock(&throughput_mutex);
+    end_count = throughput_frame_count;
+    pthread_mutex_unlock(&throughput_mutex);
 
-    while(total_sent < sizeof(Sensor_t)) {
-        ssize_t bytes_sent = send(fd, (uint8_t *)&end_sensor + total_sent, sizeof(Sensor_t) - total_sent, MSG_NOSIGNAL);
+    uint64_t frames_received = end_count - start_count;
+    double elapsed_seconds = elapsedSeconds(start_time, end_time);
+    double total_bits = (double)frames_received * (double)sizeof(Sensor_t) * 8.0;
+    double throughput_bps = total_bits / elapsed_seconds;
+
+    char response[256];
+
+    int result;
+
+    if(throughput_bps >= 1000000.0) {
+        result = snprintf(response, sizeof(response), "THROUGHPUT: %.2f Mbps\n", throughput_bps / 1000000.0);
+    }
+    else {
+        result = snprintf(response, sizeof(response), "THROUGHPUT: %.2f Kbps\n", throughput_bps / 1000.0);
+    }
+
+    if(result < 0 || result >= (int)sizeof(response)) {
+        return -1;
+    }
+
+    size_t length = strlen(response);
+    char *ptr = response;
+
+    while(length > 0) {
+        ssize_t bytes_sent = send(fd, ptr, length, MSG_NOSIGNAL);
 
         if(bytes_sent == 0) {
             return -1;
@@ -505,10 +494,11 @@ static int giveSensorThroughput(int fd) {
             return -1;
         }
 
-        total_sent += (size_t)bytes_sent;
+        ptr += bytes_sent;
+        length -= (size_t)bytes_sent;
     }
 
-    return 0;
+    return sendResponseEnd(fd);
 }
 
 static int giveSensorAll_Offline(int fd) {

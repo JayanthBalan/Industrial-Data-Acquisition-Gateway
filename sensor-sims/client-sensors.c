@@ -1,4 +1,5 @@
 
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <pthread.h>
@@ -209,9 +210,7 @@ static void *normal_client_thread(void *arg)
                 return NULL;
             }
 
-            printf("Normal client %d sent: Type=%02lX ID=%lu Length=%u\n", args->thread_id, type_value, id_value, (unsigned int)data_length);
-
-            usleep(500000);
+            usleep(40000);
         }
 
         clearerr(file);
@@ -267,7 +266,7 @@ static void *latency_client_thread(void *arg)
 
         printf("Latency packet sent: ID=0x%04X time=%lld.%09d\n", LATENCY_SENSOR_ID, (long long)seconds, nanoseconds);
 
-        sleep(5);
+        sleep(2);
     }
 
     close(sockfd);
