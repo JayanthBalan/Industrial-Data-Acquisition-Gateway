@@ -1,854 +1,514 @@
 
-#include "sense.h"
-#include "sense_utils.h"
-#include "process_init.h"
-#include <time.h>
-#include <sys/socket.h>
-#include <netdb.h>
 #include <arpa/inet.h>
+#include <errno.h>
+#include <netdb.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
 
-#define PORT "9196"
-#define BACKLOG 10
-#define CLIENT_ACCEPT_FAILURE_LIMIT_MAX 16
-#define RX_MQ_NAME "/mq-process-telemetry"
-#define RESPONSE_END_MARKER "END\n"
-
-#define SYNC_BYTE 0xAAU
-#define SYNC_BYTE_SIZE 1
-#define SELECTION_BYTE_SIZE 1
+#define SYNC_BYTE 0xAA
 #define SELECTION_BYTE_GETALL 0xF6
 #define SELECTION_BYTE_GETTYPE 0xF7
 #define SELECTION_BYTE_GETID 0xFB
+#define SELECTION_BYTE_GETTHROUGHPUT 0xFC
 #define SELECTION_BYTE_GETONLINE 0xFD
 #define SELECTION_BYTE_GETOFFLINE 0xFE
-#define SELECTION_BYTE_GETTHROUGHPUT 0xFC
-#define ID_BYTE_SIZE 2
-#define TYPE_BYTE_SIZE 1
-#define TRANSMIT_BUFFER_SIZE 500
 
-static mqd_t rx_process_mq;
-pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t throughput_mutex = PTHREAD_MUTEX_INITIALIZER;
+#define LATENCY_SENSOR_ID 65000
+#define TELEMETRY_BUFFER_SIZE 4096
+#define LATENCY_LOG_FILE "latency-log.csv"
 
-static Sensor_t *sensor_registry = NULL;
-static size_t sensor_count = 0UL;
-static size_t sensor_reallocation = 1UL;
-static uint64_t throughput_frame_count = 0ULL;
-static const size_t sensor_allocation_count = 16UL;
-static const double sensor_activity_time = SENSOR_INACTIVE_SECS_MAX;
+typedef struct {
+    const char *server_ip;
+    int server_port;
+    pthread_mutex_t *request_mutex;
+} receiver_args_t;
 
-static int socket_init(int *);
-static int ipc_init(void);
-static ssize_t receiveFrame(Sensor_t *);
-static int userInterface_init(void);
-static int sensorWatchdog_init(void);
-static void *WDT_SensorHandler(void *);
-static inline double elapsedSeconds(sensor_timespec_t, sensor_timespec_t);
-static void *socketConnectionHandler(void *);
-static void *userHandler(void *);
-static ssize_t socket_recv(int, void *, size_t);
-static int giveSensor(Sensor_t, int);
-static int giveSensorAll_Type(uint8_t, int);
-static int giveSensorAll_Online(int);
-static int giveSensorAll_Offline(int);
-static int giveSensorAll(int);
-static int sendResponseEnd(int);
-static int giveSensorThroughput(int);
+static int connect_to_server(const char *ip, int port)
+{
+    struct addrinfo hints;
+    struct addrinfo *result = NULL;
+    struct addrinfo *rp;
+    char port_string[16];
+    int sockfd = -1;
+    int status;
 
-int main(void) {
-    openlog(__FILE__, LOG_PID | LOG_CONS, LOG_DAEMON);
+    memset(&hints, 0, sizeof(hints));
 
-    if(daemon_init() == -1) {
-        closelog();
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    snprintf(port_string, sizeof(port_string), "%d", port);
+
+    status = getaddrinfo(ip, port_string, &hints, &result);
+
+    if(status != 0) {
+        fprintf(stderr, "getaddrinfo() failed: %s\n", gai_strerror(status));
         return -1;
     }
 
-    if(signals_init() == -1) {
-        closelog();
-        return -1;
-    }
+    for(rp = result; rp != NULL; rp = rp->ai_next) {
+        sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
 
-    if(ipc_init() == -1) {
-        closelog();
-        return -1;
-    }
-
-    size_t sensor_size = sizeof(Sensor_t);
-    sensor_registry = malloc(sensor_size * sensor_allocation_count);
-
-    if(sensor_registry == NULL) {
-        syslog(LOG_ERR, "malloc() Failed");
-        mq_close(rx_process_mq);
-        pthread_mutex_destroy(&registry_mutex);
-        pthread_mutex_destroy(&throughput_mutex);
-        closelog();
-        return -1;
-    }
-
-    if(sensorWatchdog_init() == -1) {
-        free(sensor_registry);
-        mq_close(rx_process_mq);
-        closelog();
-        return -1;
-    }
-
-    if(userInterface_init() == -1) {
-        free(sensor_registry);
-        mq_close(rx_process_mq);
-        closelog();
-        return -1;
-    }
-
-    while(!exitRQ) {
-        Sensor_t data_frame;
-
-        pthread_mutex_lock(&registry_mutex);
-
-        if(sensor_count >= sensor_allocation_count * sensor_reallocation && sensor_count < (size_t)SENSORS_LIMIT_MAX) {
-            size_t new_reallocation = sensor_reallocation * 2UL;
-
-            if(new_reallocation > (size_t)(SENSORS_LIMIT_MAX / sensor_allocation_count)) {
-                new_reallocation = (size_t)(SENSORS_LIMIT_MAX / sensor_allocation_count);
-            }
-
-            Sensor_t *new_registry = realloc(sensor_registry, sensor_size * sensor_allocation_count * new_reallocation);
-
-            if(new_registry == NULL) {
-                pthread_mutex_unlock(&registry_mutex);
-                syslog(LOG_ERR, "realloc() Failed");
-                free(sensor_registry);
-                mq_close(rx_process_mq);
-                closelog();
-                return -1;
-            }
-
-            sensor_registry = new_registry;
-            sensor_reallocation = new_reallocation;
-        }
-
-        pthread_mutex_unlock(&registry_mutex);
-
-        ssize_t len = receiveFrame(&data_frame);
-
-        if(len == -1) {
-            if(exitRQ) {
-                break;
-            }
-
-            free(sensor_registry);
-            mq_close(rx_process_mq);
-            closelog();
-            return -1;
-        }
-
-        if(len != (ssize_t)sensor_size) {
-            syslog(LOG_ERR, "Incomplete Frame Received");
+        if(sockfd == -1) {
             continue;
         }
 
-        pthread_mutex_lock(&throughput_mutex);
-        throughput_frame_count++;
-        pthread_mutex_unlock(&throughput_mutex);
-
-        int8_t new_sensor_flag = 0;
-        int sensor_index;
-
-        pthread_mutex_lock(&registry_mutex);
-
-        sensor_index = sensorExists(&data_frame, sensor_registry, sensor_count, &new_sensor_flag);
-
-        if(sensor_index < 0) {
-            pthread_mutex_unlock(&registry_mutex);
-            syslog(LOG_ERR, "Sensor Unsupported");
-            free(sensor_registry);
-            mq_close(rx_process_mq);
-            closelog();
-            return -1;
+        if(connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;
         }
 
-        if(new_sensor_flag == 1) {
-            if(sensor_count >= (size_t)SENSORS_LIMIT_MAX) {
-                pthread_mutex_unlock(&registry_mutex);
-                syslog(LOG_ERR, "Max Sensor Registry Size Exceeded");
-                free(sensor_registry);
-                mq_close(rx_process_mq);
-                closelog();
-                return -1;
-            }
-
-            sensor_count++;
-        }
-
-        if(updateRegistry(&data_frame, &sensor_registry[sensor_index]) == -1) {
-            pthread_mutex_unlock(&registry_mutex);
-            syslog(LOG_ERR, "Sensor Registry Update Failure");
-            free(sensor_registry);
-            mq_close(rx_process_mq);
-            closelog();
-            return -1;
-        }
-
-        pthread_mutex_unlock(&registry_mutex);
+        close(sockfd);
+        sockfd = -1;
     }
 
-    free(sensor_registry);
-    mq_close(rx_process_mq);
-    pthread_mutex_destroy(&registry_mutex);
-    pthread_mutex_destroy(&throughput_mutex);
-    closelog();
-    return 0;
+    freeaddrinfo(result);
+
+    if(sockfd == -1) {
+        perror("connect");
+    }
+
+    return sockfd;
 }
 
-static int sendResponseEnd(int socket_fd) {
-    const char *ptr = RESPONSE_END_MARKER;
-    size_t length = strlen(RESPONSE_END_MARKER);
+static int send_all(int sockfd, const void *buffer, size_t length)
+{
+    size_t total_sent = 0;
 
-    while(length > 0) {
-        ssize_t bytes_sent = send(socket_fd, ptr, length, MSG_NOSIGNAL);
+    while(total_sent < length) {
+        ssize_t bytes_sent;
 
-        if(bytes_sent == 0) {
-            return -1;
-        }
+        bytes_sent = send(sockfd, (const uint8_t *)buffer + total_sent, length - total_sent, MSG_NOSIGNAL);
 
         if(bytes_sent < 0) {
             if(errno == EINTR) {
                 continue;
             }
 
+            perror("send");
             return -1;
         }
 
-        ptr += bytes_sent;
-        length -= (size_t)bytes_sent;
+        if(bytes_sent == 0) {
+            return -1;
+        }
+
+        total_sent += (size_t)bytes_sent;
     }
 
     return 0;
 }
 
-static int userInterface_init(void) {
-    int *server_fd = malloc(sizeof(int));
+static int send_get_id(int sockfd, uint16_t id)
+{
+    uint8_t command[4];
 
-    if(server_fd == NULL) {
-        syslog(LOG_ERR, "malloc() Error: %s", strerror(errno));
+    command[0] = SYNC_BYTE;
+    command[1] = SELECTION_BYTE_GETID;
+
+    memcpy(&command[2], &id, sizeof(id));
+
+    return send_all(sockfd, command, sizeof(command));
+}
+
+static int send_get_throughput(int sockfd)
+{
+    uint8_t command[2];
+
+    command[0] = SYNC_BYTE;
+    command[1] = SELECTION_BYTE_GETTHROUGHPUT;
+
+    return send_all(sockfd, command, sizeof(command));
+}
+
+static int parse_latency_response(const char *response, int64_t *sent_seconds, int64_t *sent_nanoseconds)
+{
+    long long seconds;
+    long long nanoseconds;
+
+    if(sscanf(response, "LATENCY: %lld %lld", &seconds, &nanoseconds) != 2) {
         return -1;
     }
 
-    if(socket_init(server_fd) == -1) {
-        free(server_fd);
-        return -1;
-    }
+    *sent_seconds = (int64_t)seconds;
+    *sent_nanoseconds = (int64_t)nanoseconds;
 
-    if(listen(*server_fd, BACKLOG) == -1) {
-        syslog(LOG_ERR, "listen() failed: %s", strerror(errno));
-        close(*server_fd);
-        free(server_fd);
-        return -1;
-    }
-
-    pthread_t socketConnection;
-
-    if(pthread_create(&socketConnection, NULL, socketConnectionHandler, server_fd) != 0) {
-        close(*server_fd);
-        free(server_fd);
-        syslog(LOG_ERR, "pthread_create() Failure");
-        return -1;
-    }
-
-    pthread_detach(socketConnection);
     return 0;
 }
 
-static void *socketConnectionHandler(void *arg) {
-    int server_fd = *(int *)arg;
-    free(arg);
+static void log_latency(FILE *file, int64_t sent_seconds, int64_t sent_nanoseconds)
+{
+    static int64_t previous_seconds = -1;
+    static int64_t previous_nanoseconds = -1;
+    struct timespec now;
+    int64_t sent_time_us;
+    int64_t current_time_us;
+    int64_t latency_us;
 
-    unsigned int client_accept_failure_count = 0;
-
-    while(exitRQ == 0) {
-        struct sockaddr_storage client_addr;
-        socklen_t client_addr_len = sizeof(client_addr);
-        int *client_fd = malloc(sizeof(int));
-
-        if(client_fd == NULL) {
-            syslog(LOG_ERR, "malloc() Error: %s", strerror(errno));
-            close(server_fd);
-            break;
-        }
-
-        *client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
-
-        if(*client_fd == -1) {
-            free(client_fd);
-
-            if(errno == EINTR) {
-                if(exitRQ == 1) {
-                    break;
-                }
-
-                continue;
-            }
-
-            syslog(LOG_ERR, "accept() Failed (%u): %s", client_accept_failure_count, strerror(errno));
-
-            client_accept_failure_count++;
-
-            if(client_accept_failure_count >= CLIENT_ACCEPT_FAILURE_LIMIT_MAX) {
-                syslog(LOG_CRIT, "Critical Process Error: Multiple Client accept() Failures: Process Terminating");
-                break;
-            }
-
-            continue;
-        }
-
-        syslog(LOG_INFO, "Client %d Connection Accepted", *client_fd);
-        client_accept_failure_count = 0;
-
-        pthread_t threadConnection;
-
-        if(pthread_create(&threadConnection, NULL, userHandler, client_fd) != 0) {
-            close(*client_fd);
-            free(client_fd);
-            syslog(LOG_ERR, "pthread_create() Failure");
-            continue;
-        }
-
-        pthread_detach(threadConnection);
+    if(sent_seconds == previous_seconds && sent_nanoseconds == previous_nanoseconds) {
+        return;
     }
 
-    close(server_fd);
-    return NULL;
+    previous_seconds = sent_seconds;
+    previous_nanoseconds = sent_nanoseconds;
+
+    if(clock_gettime(CLOCK_REALTIME, &now) == -1) {
+        return;
+    }
+
+    sent_time_us = sent_seconds * 1000000LL + sent_nanoseconds / 1000LL;
+    current_time_us = (int64_t)now.tv_sec * 1000000LL + now.tv_nsec / 1000LL;
+    latency_us = current_time_us - sent_time_us;
+
+    fprintf(file, "%lld\n", (long long)latency_us);
+    fflush(file);
 }
 
-static void *userHandler(void *arg) {
-    int client_fd = *(int *)arg;
-    free(arg);
+static void print_average_latency(void)
+{
+    FILE *file;
+    char line[256];
+    int64_t values[5];
+    size_t count = 0;
+    int64_t sum = 0;
 
-    while(!exitRQ) {
-        uint8_t sync_byte_data = 0;
-        ssize_t bytes_read;
+    file = fopen(LATENCY_LOG_FILE, "r");
 
-        while(sync_byte_data != SYNC_BYTE) {
-            bytes_read = socket_recv(client_fd, &sync_byte_data, SYNC_BYTE_SIZE);
+    if(file == NULL) {
+        perror("fopen");
+        return;
+    }
 
-            if(bytes_read == 0) {
-                syslog(LOG_INFO, "Client %d Disconnected", client_fd);
-                close(client_fd);
-                return NULL;
-            }
+    while(fgets(line, sizeof(line), file) != NULL) {
+        char *endptr;
+        long long value;
 
-            if(bytes_read < 0) {
-                syslog(LOG_ERR, "recv(sync byte) Failed: %s", strerror(errno));
-                close(client_fd);
-                return NULL;
-            }
+        if(strncmp(line, "latency_microseconds", 20) == 0) {
+            continue;
         }
 
-        uint8_t selection_byte = 0;
-        bytes_read = socket_recv(client_fd, &selection_byte, SELECTION_BYTE_SIZE);
+        errno = 0;
 
-        if(bytes_read == 0) {
-            syslog(LOG_INFO, "Client %d Disconnected", client_fd);
-            break;
+        value = strtoll(line, &endptr, 10);
+
+        if(errno != 0 || endptr == line) {
+            continue;
         }
 
-        if(bytes_read < 0) {
-            syslog(LOG_ERR, "recv(selection byte) Failed: %s", strerror(errno));
-            break;
-        }
-
-        if(selection_byte == SELECTION_BYTE_GETID) {
-            uint16_t call_id = 0;
-            bytes_read = socket_recv(client_fd, &call_id, ID_BYTE_SIZE);
-
-            if(bytes_read == 0) {
-                syslog(LOG_INFO, "Client %d Disconnected", client_fd);
-                break;
-            }
-
-            if(bytes_read < 0) {
-                syslog(LOG_ERR, "recv(call id) Failed: %s", strerror(errno));
-                break;
-            }
-
-            pthread_mutex_lock(&registry_mutex);
-            Sensor_t target_sensor = getSensor_ID(call_id, sensor_registry, sensor_count);
-            pthread_mutex_unlock(&registry_mutex);
-
-            if(giveSensor(target_sensor, client_fd) == -1 || sendResponseEnd(client_fd) == -1) {
-                syslog(LOG_ERR, "send() Failed");
-                break;
-            }
-        }
-        else if(selection_byte == SELECTION_BYTE_GETTYPE) {
-            uint8_t call_type = 0;
-            bytes_read = socket_recv(client_fd, &call_type, TYPE_BYTE_SIZE);
-
-            if(bytes_read == 0) {
-                syslog(LOG_INFO, "Client %d Disconnected", client_fd);
-                break;
-            }
-
-            if(bytes_read < 0) {
-                syslog(LOG_ERR, "recv(call type) Failed: %s", strerror(errno));
-                break;
-            }
-
-            if(giveSensorAll_Type(call_type, client_fd) == -1) {
-                syslog(LOG_ERR, "send() Failed");
-                break;
-            }
-        }
-        else if(selection_byte == SELECTION_BYTE_GETONLINE) {
-            if(giveSensorAll_Online(client_fd) == -1) {
-                syslog(LOG_ERR, "send() Failed");
-                break;
-            }
-        }
-        else if(selection_byte == SELECTION_BYTE_GETOFFLINE) {
-            if(giveSensorAll_Offline(client_fd) == -1) {
-                syslog(LOG_ERR, "send() Failed");
-                break;
-            }
-        }
-        else if(selection_byte == SELECTION_BYTE_GETALL) {
-            if(giveSensorAll(client_fd) == -1) {
-                syslog(LOG_ERR, "send() Failed");
-                break;
-            }
-        }
-        else if(selection_byte == SELECTION_BYTE_GETTHROUGHPUT) {
-            if(giveSensorThroughput(client_fd) == -1) {
-                syslog(LOG_ERR, "Throughput send() Failed");
-                break;
-            }
+        if(count < 5) {
+            values[count++] = (int64_t)value;
         }
         else {
-            syslog(LOG_ERR, "Unsupported View Option");
-            break;
+            values[0] = values[1];
+            values[1] = values[2];
+            values[2] = values[3];
+            values[3] = values[4];
+            values[4] = (int64_t)value;
         }
     }
 
-    close(client_fd);
-    return NULL;
+    fclose(file);
+
+    if(count == 0) {
+        printf("No latency samples available\n");
+        return;
+    }
+
+    for(size_t i = 0; i < count; i++) {
+        sum += values[i];
+    }
+
+    printf("Average latency from the last %zu samples: %lld microseconds\n", count, (long long)(sum / (int64_t)count));
 }
 
-static int giveSensorThroughput(int fd) {
-    struct timespec start_time;
-    struct timespec end_time;
-    uint64_t start_count;
-    uint64_t end_count;
+static int process_line(const char *line, int print_response, FILE *latency_file)
+{
+    int64_t sent_seconds;
+    int64_t sent_nanoseconds;
 
-    if(clock_gettime(CLOCK_MONOTONIC, &start_time) == -1) {
-        return -1;
+    if(strcmp(line, "END") == 0) {
+        return 1;
     }
 
-    pthread_mutex_lock(&throughput_mutex);
-    start_count = throughput_frame_count;
-    pthread_mutex_unlock(&throughput_mutex);
-
-    sleep(10);
-
-    if(clock_gettime(CLOCK_MONOTONIC, &end_time) == -1) {
-        return -1;
+    if(print_response) {
+        printf("%s\n", line);
     }
 
-    pthread_mutex_lock(&throughput_mutex);
-    end_count = throughput_frame_count;
-    pthread_mutex_unlock(&throughput_mutex);
-
-    uint64_t frames_received = end_count - start_count;
-    double elapsed_seconds = elapsedSeconds(start_time, end_time);
-    double total_bits = (double)frames_received * (double)sizeof(Sensor_t) * 8.0;
-    double throughput_bps = total_bits / elapsed_seconds;
-
-    char response[256];
-
-    int result;
-
-    if(throughput_bps >= 1000000.0) {
-        result = snprintf(response, sizeof(response), "THROUGHPUT: %.2f Mbps\n", throughput_bps / 1000000.0);
-    }
-    else {
-        result = snprintf(response, sizeof(response), "THROUGHPUT: %.2f Kbps\n", throughput_bps / 1000.0);
-    }
-
-    if(result < 0 || result >= (int)sizeof(response)) {
-        return -1;
-    }
-
-    size_t length = strlen(response);
-    char *ptr = response;
-
-    while(length > 0) {
-        ssize_t bytes_sent = send(fd, ptr, length, MSG_NOSIGNAL);
-
-        if(bytes_sent == 0) {
-            return -1;
+    if(latency_file != NULL) {
+        if(parse_latency_response(line, &sent_seconds, &sent_nanoseconds) == 0) {
+            log_latency(latency_file, sent_seconds, sent_nanoseconds);
         }
-
-        if(bytes_sent < 0) {
-            if(errno == EINTR) {
-                continue;
-            }
-
-            return -1;
-        }
-
-        ptr += bytes_sent;
-        length -= (size_t)bytes_sent;
-    }
-
-    return sendResponseEnd(fd);
-}
-
-static int giveSensorAll_Offline(int fd) {
-    pthread_mutex_lock(&registry_mutex);
-
-    size_t count = sensor_count;
-    Sensor_t *snapshot = NULL;
-
-    if(count > 0) {
-        snapshot = malloc(sizeof(Sensor_t) * count);
-
-        if(snapshot == NULL) {
-            pthread_mutex_unlock(&registry_mutex);
-            return -1;
-        }
-
-        memcpy(snapshot, sensor_registry, sizeof(Sensor_t) * count);
-    }
-
-    pthread_mutex_unlock(&registry_mutex);
-
-    for(size_t idx = 0; idx < count; idx++) {
-        if(snapshot[idx].state == SENSOR_OFFLINE) {
-            if(giveSensor(snapshot[idx], fd) == -1) {
-                free(snapshot);
-                return -1;
-            }
-        }
-    }
-
-    free(snapshot);
-
-    return sendResponseEnd(fd);
-}
-
-static int giveSensorAll_Online(int fd) {
-    pthread_mutex_lock(&registry_mutex);
-
-    size_t count = sensor_count;
-    Sensor_t *snapshot = NULL;
-
-    if(count > 0) {
-        snapshot = malloc(sizeof(Sensor_t) * count);
-
-        if(snapshot == NULL) {
-            pthread_mutex_unlock(&registry_mutex);
-            return -1;
-        }
-
-        memcpy(snapshot, sensor_registry, sizeof(Sensor_t) * count);
-    }
-
-    pthread_mutex_unlock(&registry_mutex);
-
-    for(size_t idx = 0; idx < count; idx++) {
-        if(snapshot[idx].state == SENSOR_ONLINE) {
-            if(giveSensor(snapshot[idx], fd) == -1) {
-                free(snapshot);
-                return -1;
-            }
-        }
-    }
-
-    free(snapshot);
-
-    return sendResponseEnd(fd);
-}
-
-static int giveSensorAll_Type(uint8_t type_byte, int fd) {
-    SensorType_e type = findSensorType(type_byte);
-
-    if(type == SENSOR_TYPE_UNSUPPORTED) {
-        syslog(LOG_WARNING, "Unsupported sensor type requested");
-        return -1;
-    }
-
-    pthread_mutex_lock(&registry_mutex);
-
-    size_t count = sensor_count;
-    Sensor_t *snapshot = NULL;
-
-    if(count > 0) {
-        snapshot = malloc(sizeof(Sensor_t) * count);
-
-        if(snapshot == NULL) {
-            pthread_mutex_unlock(&registry_mutex);
-            return -1;
-        }
-
-        memcpy(snapshot, sensor_registry, sizeof(Sensor_t) * count);
-    }
-
-    pthread_mutex_unlock(&registry_mutex);
-
-    for(size_t idx = 0; idx < count; idx++) {
-        if(snapshot[idx].type == type) {
-            if(giveSensor(snapshot[idx], fd) == -1) {
-                free(snapshot);
-                return -1;
-            }
-        }
-    }
-
-    free(snapshot);
-
-    return sendResponseEnd(fd);
-}
-
-static int giveSensorAll(int fd) {
-    pthread_mutex_lock(&registry_mutex);
-
-    size_t count = sensor_count;
-    Sensor_t *snapshot = NULL;
-
-    if(count > 0) {
-        snapshot = malloc(sizeof(Sensor_t) * count);
-
-        if(snapshot == NULL) {
-            pthread_mutex_unlock(&registry_mutex);
-            return -1;
-        }
-
-        memcpy(snapshot, sensor_registry, sizeof(Sensor_t) * count);
-    }
-
-    pthread_mutex_unlock(&registry_mutex);
-
-    for(size_t idx = 0; idx < count; idx++) {
-        if(giveSensor(snapshot[idx], fd) == -1) {
-            free(snapshot);
-            return -1;
-        }
-    }
-
-    free(snapshot);
-
-    return sendResponseEnd(fd);
-}
-
-static int giveSensor(Sensor_t target, int socket_fd) {
-    char timestamp_curr[50] = "";
-    char dataString[300] = "";
-    char sendBuffer[TRANSMIT_BUFFER_SIZE] = "";
-
-    if(target.id == 65000U) {
-        int result = snprintf(sendBuffer, sizeof(sendBuffer), "LATENCY: %ld %ld\n", target.timestamp.tv_sec, target.timestamp.tv_nsec);
-
-        if(result < 0 || result >= (int)sizeof(sendBuffer)) {
-            syslog(LOG_ERR, "Latency response too large");
-            return -1;
-        }
-    }
-    else {
-        getTime(target, timestamp_curr);
-        getDataString(target, dataString);
-
-        int result = snprintf(sendBuffer, sizeof(sendBuffer), "%s: %s: %s\n", timestamp_curr, target.name, dataString);
-
-        if(result < 0 || result >= (int)sizeof(sendBuffer)) {
-            syslog(LOG_ERR, "Telemetry response too large");
-            return -1;
-        }
-    }
-
-    size_t length = strlen(sendBuffer);
-    char *ptr = sendBuffer;
-
-    while(length > 0) {
-        ssize_t bytes_sent = send(socket_fd, ptr, length, MSG_NOSIGNAL);
-
-        if(bytes_sent == 0) {
-            syslog(LOG_INFO, "Client %d Disconnected", socket_fd);
-            return -1;
-        }
-
-        if(bytes_sent < 0) {
-            if(errno == EINTR) {
-                continue;
-            }
-
-            return -1;
-        }
-
-        ptr += bytes_sent;
-        length -= (size_t)bytes_sent;
     }
 
     return 0;
 }
 
-static ssize_t socket_recv(int fd, void *buffer, size_t len) {
-    size_t total = 0;
+static int receive_until_end(int sockfd, int print_response, FILE *latency_file)
+{
+    char buffer[TELEMETRY_BUFFER_SIZE];
+    char line[TELEMETRY_BUFFER_SIZE];
+    size_t line_length = 0;
 
-    while(total < len) {
-        ssize_t bytes_read = recv(fd, (uint8_t *)buffer + total, len - total, 0);
+    while(1) {
+        ssize_t bytes_received;
 
-        if(bytes_read == 0) {
-            return 0;
+        bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
+
+        if(bytes_received == 0) {
+            return -1;
         }
 
-        if(bytes_read < 0) {
+        if(bytes_received < 0) {
             if(errno == EINTR) {
-                if(exitRQ) {
+                continue;
+            }
+
+            perror("recv");
+            return -1;
+        }
+
+        for(ssize_t i = 0; i < bytes_received; i++) {
+            if(buffer[i] == '\n') {
+                int result;
+
+                line[line_length] = '\0';
+
+                result = process_line(line, print_response, latency_file);
+
+                line_length = 0;
+
+                if(result == 1) {
+                    return 0;
+                }
+            }
+            else {
+                if(line_length >= sizeof(line) - 1) {
                     return -1;
                 }
 
-                continue;
-            }
-
-            return -1;
-        }
-
-        total += (size_t)bytes_read;
-    }
-
-    return (ssize_t)total;
-}
-
-static int socket_init(int *server_fd) {
-    struct addrinfo serverHints;
-    struct addrinfo *serverInfo = NULL;
-    memset(&serverHints, 0, sizeof(serverHints));
-
-    *server_fd = -1;
-    serverHints.ai_family = AF_INET6;
-    serverHints.ai_socktype = SOCK_STREAM;
-    serverHints.ai_flags = AI_PASSIVE;
-    serverHints.ai_protocol = 0;
-
-    int status = getaddrinfo(NULL, PORT, &serverHints, &serverInfo);
-
-    if(status != 0) {
-        syslog(LOG_ERR, "getaddrinfo() Failed: %s", gai_strerror(status));
-        return -1;
-    }
-
-    *server_fd = socket(serverInfo->ai_family, serverInfo->ai_socktype, serverInfo->ai_protocol);
-
-    if(*server_fd == -1) {
-        freeaddrinfo(serverInfo);
-        syslog(LOG_ERR, "socket() Failed: %s", strerror(errno));
-        return -1;
-    }
-
-    int opt = 1;
-
-    if(setsockopt(*server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
-        syslog(LOG_ERR, "setsockopt() Failed: %s", strerror(errno));
-        close(*server_fd);
-        freeaddrinfo(serverInfo);
-        return -1;
-    }
-
-    if(bind(*server_fd, serverInfo->ai_addr, serverInfo->ai_addrlen) == -1) {
-        syslog(LOG_ERR, "bind() Failed: %s", strerror(errno));
-        close(*server_fd);
-        freeaddrinfo(serverInfo);
-        return -1;
-    }
-
-    freeaddrinfo(serverInfo);
-    return 0;
-}
-
-static int sensorWatchdog_init(void) {
-    pthread_t threadConnection;
-
-    if(pthread_create(&threadConnection, NULL, WDT_SensorHandler, NULL) != 0) {
-        syslog(LOG_ERR, "pthread_create() Failure");
-        return -1;
-    }
-
-    pthread_detach(threadConnection);
-    return 0;
-}
-
-static void *WDT_SensorHandler(void *arg) {
-    (void)arg;
-
-    while(!exitRQ) {
-        sensor_timespec_t curr_time;
-        clock_gettime(CLOCK_MONOTONIC, &curr_time);
-
-        pthread_mutex_lock(&registry_mutex);
-
-        for(size_t sense_idx = 0; sense_idx < sensor_count; sense_idx++) {
-            double elapsed = elapsedSeconds(sensor_registry[sense_idx].last_seen_time, curr_time);
-
-            if(elapsed >= sensor_activity_time) {
-                sensor_registry[sense_idx].state = SENSOR_OFFLINE;
-            }
-            else {
-                sensor_registry[sense_idx].state = SENSOR_ONLINE;
+                line[line_length++] = buffer[i];
             }
         }
+    }
+}
 
-        pthread_mutex_unlock(&registry_mutex);
-        usleep(50000);
+static void *latency_receiver_thread(void *arg)
+{
+    receiver_args_t *args = arg;
+    FILE *latency_file;
+
+    latency_file = fopen(LATENCY_LOG_FILE, "w");
+
+    if(latency_file == NULL) {
+        perror("fopen");
+        return NULL;
+    }
+
+    fprintf(latency_file, "latency_microseconds\n");
+    fflush(latency_file);
+
+    while(1) {
+        int sockfd;
+
+        pthread_mutex_lock(args->request_mutex);
+
+        sockfd = connect_to_server(args->server_ip, args->server_port);
+
+        if(sockfd != -1) {
+            if(send_get_id(sockfd, LATENCY_SENSOR_ID) == 0) {
+                receive_until_end(sockfd, 0, latency_file);
+            }
+
+            close(sockfd);
+        }
+
+        pthread_mutex_unlock(args->request_mutex);
+
+        usleep(15000);
     }
 
     return NULL;
 }
 
-static inline double elapsedSeconds(sensor_timespec_t prev, sensor_timespec_t curr) {
-    return (curr.tv_sec - prev.tv_sec) + (curr.tv_nsec - prev.tv_nsec) / 1000000000.0;
-}
+static int send_user_command(int sockfd, const char *command)
+{
+    uint8_t packet[4];
+    uint16_t id;
+    uint8_t type;
 
-static ssize_t receiveFrame(Sensor_t *frame) {
-    size_t frame_size = sizeof(Sensor_t);
-    unsigned int priority;
+    if(strcmp(command, "GET ALL\n") == 0) {
+        packet[0] = SYNC_BYTE;
+        packet[1] = SELECTION_BYTE_GETALL;
 
-    while(!exitRQ) {
-        ssize_t bytes_read = mq_receive(rx_process_mq, (char *)frame, frame_size, &priority);
+        return send_all(sockfd, packet, 2);
+    }
 
-        if(bytes_read >= 0) {
-            return bytes_read;
+    if(strcmp(command, "GET ONLINE\n") == 0) {
+        packet[0] = SYNC_BYTE;
+        packet[1] = SELECTION_BYTE_GETONLINE;
+
+        return send_all(sockfd, packet, 2);
+    }
+
+    if(strcmp(command, "GET OFFLINE\n") == 0) {
+        packet[0] = SYNC_BYTE;
+        packet[1] = SELECTION_BYTE_GETOFFLINE;
+
+        return send_all(sockfd, packet, 2);
+    }
+
+    if(strncmp(command, "GET ID ", 7) == 0) {
+        char *endptr;
+        unsigned long value;
+
+        value = strtoul(command + 7, &endptr, 16);
+
+        if(endptr == command + 7 || value > UINT16_MAX) {
+            fprintf(stderr, "Invalid hexadecimal sensor ID\n");
+            return -1;
         }
 
-        if(errno == EINTR) {
+        id = (uint16_t)value;
+
+        packet[0] = SYNC_BYTE;
+        packet[1] = SELECTION_BYTE_GETID;
+
+        memcpy(&packet[2], &id, sizeof(id));
+
+        return send_all(sockfd, packet, 4);
+    }
+
+    if(strcmp(command, "GET TYPE POWCURRVOLT\n") == 0) {
+        type = 0x2B;
+    }
+    else if(strcmp(command, "GET TYPE TOR\n") == 0) {
+        type = 0x4B;
+    }
+    else if(strcmp(command, "GET TYPE TEMPRESS\n") == 0) {
+        type = 0x1B;
+    }
+    else if(strcmp(command, "GET TYPE PROX\n") == 0) {
+        type = 0x8B;
+    }
+    else {
+        fprintf(stderr, "Invalid command\n");
+        return -1;
+    }
+
+    packet[0] = SYNC_BYTE;
+    packet[1] = SELECTION_BYTE_GETTYPE;
+    packet[2] = type;
+
+    return send_all(sockfd, packet, 3);
+}
+
+int main(int argc, char *argv[])
+{
+    const char *server_ip;
+    int server_port;
+    receiver_args_t args;
+    pthread_t latency_thread;
+    pthread_mutex_t request_mutex;
+    char command[256];
+
+    if(argc != 3) {
+        fprintf(stderr, "Usage: %s <QEMU_IP> <TELEMETRY_PORT>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    server_ip = argv[1];
+    server_port = atoi(argv[2]);
+
+    if(pthread_mutex_init(&request_mutex, NULL) != 0) {
+        perror("pthread_mutex_init");
+        return EXIT_FAILURE;
+    }
+
+    args.server_ip = server_ip;
+    args.server_port = server_port;
+    args.request_mutex = &request_mutex;
+
+    if(pthread_create(&latency_thread, NULL, latency_receiver_thread, &args) != 0) {
+        perror("pthread_create");
+        pthread_mutex_destroy(&request_mutex);
+        return EXIT_FAILURE;
+    }
+
+    printf("Commands:\n");
+    printf("GET ALL\n");
+    printf("GET TYPE POWCURRVOLT\n");
+    printf("GET TYPE TOR\n");
+    printf("GET TYPE TEMPRESS\n");
+    printf("GET TYPE PROX\n");
+    printf("GET ONLINE\n");
+    printf("GET OFFLINE\n");
+    printf("GET ID <Sensor_ID>\n");
+    printf("GET LATENCY\n");
+    printf("GET THROUGHPUT\n");
+
+    while(1) {
+        int sockfd;
+
+        printf("> ");
+        fflush(stdout);
+
+        if(fgets(command, sizeof(command), stdin) == NULL) {
+            break;
+        }
+
+        if(strcmp(command, "GET LATENCY\n") == 0) {
+            print_average_latency();
             continue;
         }
 
-        syslog(LOG_ERR, "mq_receive() Failure: %s", strerror(errno));
-        return -1;
+        pthread_mutex_lock(&request_mutex);
+
+        sockfd = connect_to_server(server_ip, server_port);
+
+        if(sockfd == -1) {
+            pthread_mutex_unlock(&request_mutex);
+            continue;
+        }
+
+        if(strcmp(command, "GET THROUGHPUT\n") == 0) {
+            if(send_get_throughput(sockfd) == -1) {
+                close(sockfd);
+                pthread_mutex_unlock(&request_mutex);
+                continue;
+            }
+
+            if(receive_until_end(sockfd, 1, NULL) == -1) {
+                fprintf(stderr, "Failed to receive throughput data\n");
+            }
+
+            close(sockfd);
+            pthread_mutex_unlock(&request_mutex);
+            continue;
+        }
+
+        if(send_user_command(sockfd, command) == -1) {
+            close(sockfd);
+            pthread_mutex_unlock(&request_mutex);
+            continue;
+        }
+
+        if(receive_until_end(sockfd, 1, NULL) == -1) {
+            fprintf(stderr, "Failed to receive complete response\n");
+        }
+
+        close(sockfd);
+        pthread_mutex_unlock(&request_mutex);
     }
 
-    return -1;
-}
+    pthread_cancel(latency_thread);
+    pthread_join(latency_thread, NULL);
 
-static int ipc_init(void) {
-    rx_process_mq = mq_open(RX_MQ_NAME, O_RDONLY);
+    pthread_mutex_destroy(&request_mutex);
 
-    if(rx_process_mq == (mqd_t)-1) {
-        syslog(LOG_ERR, "mq_open() Failed: %s", strerror(errno));
-        return -1;
-    }
-
-    struct mq_attr attr;
-
-    if(mq_getattr(rx_process_mq, &attr) == -1) {
-        syslog(LOG_ERR, "mq_getattr failed: %s", strerror(errno));
-        mq_close(rx_process_mq);
-        return -1;
-    }
-
-    if(attr.mq_msgsize < 0 || (size_t)attr.mq_msgsize < sizeof(Sensor_t)) {
-        syslog(LOG_ERR, "Acquisition MQ message size too small: %ld", attr.mq_msgsize);
-        mq_close(rx_process_mq);
-        return -1;
-    }
-
-    return 0;
+    return EXIT_SUCCESS;
 }
