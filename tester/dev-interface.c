@@ -128,10 +128,10 @@ static int send_get_throughput(int sockfd)
 
 static int parse_latency_response(const char *response, int64_t *sent_seconds, int64_t *sent_nanoseconds)
 {
-    long long seconds;
-    long long nanoseconds;
+    long seconds;
+    long nanoseconds;
 
-    if(sscanf(response, "LATENCY: %lld %lld", &seconds, &nanoseconds) != 2) {
+    if(sscanf(response, "LATENCY: %ld %ld", &seconds, &nanoseconds) != 2) {
         return -1;
     }
 

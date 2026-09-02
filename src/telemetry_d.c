@@ -638,13 +638,20 @@ static int giveSensorAll(int fd) {
     return sendResponseEnd(fd);
 }
 
-static int giveSensor(Sensor_t target, int socket_fd) {
+static int giveSensor(Sensor_t target, int socket_fd)
+{
     char timestamp_curr[50] = "";
     char dataString[300] = "";
     char sendBuffer[TRANSMIT_BUFFER_SIZE] = "";
 
     if(target.id == 65000U) {
-        int result = snprintf(sendBuffer, sizeof(sendBuffer), "LATENCY: %ld %ld\n", target.timestamp.tv_sec, target.timestamp.tv_nsec);
+        int64_t sent_seconds;
+        int32_t sent_nanoseconds;
+
+        memcpy(&sent_seconds, &target.data, sizeof(sent_seconds));
+        memcpy(&sent_nanoseconds, (const uint8_t *)&target.data + sizeof(sent_seconds), sizeof(sent_nanoseconds));
+
+        int result = snprintf(sendBuffer, sizeof(sendBuffer), "LATENCY: %lld %d\n", (long long)sent_seconds, (int)sent_nanoseconds);
 
         if(result < 0 || result >= (int)sizeof(sendBuffer)) {
             syslog(LOG_ERR, "Latency response too large");
@@ -656,7 +663,6 @@ static int giveSensor(Sensor_t target, int socket_fd) {
         getDataString(target, dataString);
 
         int result = snprintf(sendBuffer, sizeof(sendBuffer), "%s: %s: %s\n", timestamp_curr, target.name, dataString);
-
         if(result < 0 || result >= (int)sizeof(sendBuffer)) {
             syslog(LOG_ERR, "Telemetry response too large");
             return -1;
