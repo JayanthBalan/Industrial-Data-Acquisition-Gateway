@@ -23,6 +23,8 @@
 #define TELEMETRY_BUFFER_SIZE 4096
 #define LATENCY_LOG_FILE "latency-log.csv"
 
+int latency_poll_time;
+
 typedef struct {
     const char *server_ip;
     int server_port;
@@ -329,7 +331,7 @@ static void *latency_receiver_thread(void *arg)
 
         pthread_mutex_unlock(args->request_mutex);
 
-        usleep(15000);
+        usleep(latency_poll_time);
     }
 
     return NULL;
@@ -416,13 +418,14 @@ int main(int argc, char *argv[])
     pthread_mutex_t request_mutex;
     char command[256];
 
-    if(argc != 3) {
+    if(argc != 4) {
         fprintf(stderr, "Usage: %s <QEMU_IP> <TELEMETRY_PORT>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
     server_ip = argv[1];
     server_port = atoi(argv[2]);
+    latency_poll_time = atoi(argv[3]);
 
     if(pthread_mutex_init(&request_mutex, NULL) != 0) {
         perror("pthread_mutex_init");

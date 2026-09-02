@@ -34,6 +34,8 @@ static size_t build_packet(uint8_t type, uint16_t id, const uint8_t *data, uint1
 static void *normal_client_thread(void *arg);
 static void *latency_client_thread(void *arg);
 
+int sleep_time;
+
 static int connect_to_server(const char *ip, int port)
 {
     int sockfd;
@@ -210,7 +212,7 @@ static void *normal_client_thread(void *arg)
                 return NULL;
             }
 
-            usleep(40000);
+            usleep(sleep_time);
         }
 
         clearerr(file);
@@ -282,8 +284,8 @@ int main(int argc, char *argv[])
     pthread_t *threads;
     thread_args_t *args;
 
-    if (argc != 5) {
-        fprintf(stderr, "Usage: %s <QEMU_IP> <PORT> <DATA_FILE> <NUMBER_OF_CLIENTS>\n", argv[0]);
+    if (argc != 6) {
+        fprintf(stderr, "Usage: %s <QEMU_IP> <PORT> <DATA_FILE> <NUMBER_OF_CLIENTS> <SLEEP_TIME_BTW_PACKET_TRANSMITS>\n", argv[0]);
 
         return EXIT_FAILURE;
     }
@@ -292,6 +294,7 @@ int main(int argc, char *argv[])
     server_port = atoi(argv[2]);
     data_file = argv[3];
     number_of_clients = atoi(argv[4]);
+    sleep_time = atoi(argv[5]);
 
     if (server_port < 1 || server_port > 65535) {
         fprintf(stderr, "PORT must be between 1 and 65535\n");
