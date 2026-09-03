@@ -480,8 +480,11 @@ The following results were observed using the default project configuration:
 - 500 microsecond latency polling interval
 - Buildroot ARM64 device running under QEMU
 
-**latency** = 9866 us
-**throughput** = 61.75 kbps
+---
+> **latency** = 9866 us
+
+> **throughput** = 61.75 kbps
+---
 
 ### Terminal Interaction:
 
