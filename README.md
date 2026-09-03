@@ -41,17 +41,16 @@ Sensor Clients
       |
       | POSIX Message Queue
       v
- processingd
-      |
-      v
- loggingd
-      |
-      v
- telemetryd
-      |
-      | TCP Port 9196
-      v
- Device Interface
+ processingd -----------------
+      |                      |
+      | POSIX Message Queues |
+      |                      |
+      v                      v
+ loggingd                telemetryd
+                             |
+                             | TCP Port 9196
+                             v
+                         Device Interface
 ```
 
 All four daemons start automatically via init scripts as soon as the device boots, so there's nothing to launch manually on the device side once QEMU is up.
@@ -64,13 +63,9 @@ The device is emulated using QEMU.
 
 The simulated sensor clients communicate with the device using the following packet format:
 
-```
-+--------+--------+-----------+-------------+--------------+
-| Sync   | Type   | Sensor ID | Data Length | Sensor Data  |
-+--------+--------+-----------+-------------+--------------+
-| 1 byte | 1 byte | 2 bytes   | 2 bytes     | Variable     |
-+--------+--------+-----------+-------------+--------------+
-```
+| Sync | Type | Sensor ID | Data Length | Sensor Data |
+| --- | --- | --- | --- | --- |
+| 1 byte | 1 byte | 2 bytes | 2 bytes | variable |
 
 The sync field is:
 
@@ -80,7 +75,7 @@ The sync field is:
 
 The sensor ID and data length are transmitted in little-endian byte order.
 
-The packet data is then converted into the internal `Sensor_t` frame used by the device daemons.
+The received sensor packet is parsed and converted into the internal Sensor_t frame used by the device daemons.
 
 ### Internal sensor frame
 
@@ -194,7 +189,6 @@ base_external/configs/
 
 The defconfig enables the required Buildroot packages and the Industrial Data Acquisition Gateway package. Use the saved defconfig when creating or rebuilding the Buildroot configuration.
 
-> **Note:** `build-device.sh` picks up the saved defconfig through `$AESD_MODIFIED_DEFCONFIG` / `$AESD_DEFAULT_DEFCONFIG`, but `shared.sh` only defines `GATEWAY_MODIFIED_DEFCONFIG` / `GATEWAY_DEFAULT_DEFCONFIG`. If the build doesn't pick up the saved config automatically, apply it directly:
 > ```bash
 > make -C buildroot defconfig BR2_EXTERNAL=$(pwd)/base_external BR2_DEFCONFIG=$(pwd)/base_external/configs/_qemu_defconfig
 > ```
@@ -349,8 +343,6 @@ Alternatively, the default run script can rebuild the programs before starting:
 ./runproject-default.sh build
 ```
 
-> **Note:** the `build` option in `runproject-default.sh` currently points at `projectbuild.mk`, but the actual file in this repo is `project-build.mk`. Until that's fixed, use `make -f project-build.mk` directly, then run `./runproject-default.sh` normally.
-
 ## Performance Notes
 
 The sensor simulation parameters involve tradeoffs.
@@ -359,7 +351,7 @@ The sensor simulation parameters involve tradeoffs.
 - Higher throughput.
 - More concurrent sensor traffic.
 - Higher processing and scheduling overhead.
-- Can increase packet loss or missed/corrupted simulated data under heavier load.
+- Can increase packet loss, missed/corrupted data, dropped frames or simulation-side contention under heavier load.
 
 **Increasing the delay between sensor packets** — generally:
 - Lower traffic load.
@@ -382,11 +374,16 @@ Industrial-Data-Acquisition-Gateway/
 │
 ├── base_external/
 │   ├── configs/
-│   │   └── _qemu_defconfig          Saved Buildroot defconfig
+│   │   └── _qemu_defconfig   Saved Buildroot defconfig
 │   │
-│   └── package/
-│       └── industrial-data-acquisition-gateway/
-│           └── industrial-data-acquisition-gateway.mk
+│   ├── package/
+│   │   └── industrial-data-acquisition-gateway/
+│   │       ├── industrial-data-acquisition-gateway.mk
+│   │       └── Config.in
+│   ├── Config.in
+│   ├── external.mk
+│   └── external.desc
+│
 │
 ├── builder/
 │   ├── build-device.sh
@@ -408,13 +405,21 @@ Industrial-Data-Acquisition-Gateway/
 │
 ├── sensor-sims/
 │   ├── client-sensors.c
+│   ├── client-sensors
 │   └── sensors-data.txt
 │
 ├── tester/
+│   ├── dev-interface
 │   └── dev-interface.c
 │
 ├── project-build.mk
 ├── runproject-default.sh
+├── latency-log.csv
+├── README.md
+├── shared.sh
+├── daemons4d-start-stop
+├── mount1q-start-stop
+├── network-start-stop
 └── runqemu.sh
 ```
 

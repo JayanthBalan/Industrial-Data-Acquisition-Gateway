@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ "$#" -eq 1 ] && [ "$1" = "build" ]; then
-    make -f projectbuild.mk
+    make -f project-build.mk
 fi
 
 ./sensor-sims/client-sensors 127.0.0.1 9000 sensor-sims/sensors-data.txt 4 30000 > /dev/null 2>&1 &
